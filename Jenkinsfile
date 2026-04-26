@@ -85,7 +85,14 @@ pipeline {
         stage('Release') {
             // Only when a tag like v1.2.3 was pushed and discovered by multibranch
             when { expression { return env.RELEASE_TAG?.startsWith('v') } }
-            agent { label 'docker' }
+            agent {
+                docker {
+                    // Ships gh CLI; no host apt/sudo dependency.
+                    image 'maniator/gh:latest'
+                    label 'docker'
+                    args '--entrypoint=""'
+                }
+            }
             steps {
                 checkout scm
                 unstash 'binary-linux-x64'
@@ -94,14 +101,6 @@ pipeline {
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
-                        # gh CLI is expected on the agent; install if missing.
-                        if ! command -v gh >/dev/null 2>&1; then
-                            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                                | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-                            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                                | sudo tee /etc/apt/sources.list.d/github-cli.list
-                            sudo apt-get update -qq && sudo apt-get install -y -qq gh
-                        fi
 
                         # Create the release if it does not exist yet (idempotent).
                         if ! gh release view "${RELEASE_TAG}" --repo FishMoiLaPaix/persoia-cli >/dev/null 2>&1; then

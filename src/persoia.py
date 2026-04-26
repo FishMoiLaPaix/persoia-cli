@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
@@ -130,12 +131,16 @@ def save_config(values: dict) -> None:
         if key.startswith("PERSOIA_") and value:
             lines.append(f"{key}={value}")
     lines.append("")
+    content = "\n".join(lines)
 
-    config_path.write_text("\n".join(lines), encoding="utf-8")
-
-    # Restrictive permissions (Unix only)
-    if platform.system() != "Windows":
-        config_path.chmod(0o600)
+    if platform.system() == "Windows":
+        config_path.write_text(content, encoding="utf-8")
+    else:
+        # Open with restrictive mode upfront — avoids an umask-dependent window
+        # where the API key would be world-readable between write and chmod.
+        fd = os.open(str(config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
 
 
 def api_request(
@@ -960,7 +965,10 @@ def cmd_login(args: list[str]) -> None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             content = resp.read().decode("utf-8")
             status = resp.status
-            body_json = json.loads(content)
+            try:
+                body_json = json.loads(content)
+            except json.JSONDecodeError:
+                body_json = content
     except urllib.error.HTTPError as e:
         content = e.read().decode("utf-8", errors="replace")
         status = e.code
@@ -1010,8 +1018,21 @@ def cmd_login(args: list[str]) -> None:
         model = model or config_data.get("model", "")
         tenant_name = tenant_name or config_data.get("tenant_name", "")
         raw_api_base = config_data.get("api_base", "").strip()
-        # Validate URL before trusting the API response
-        if raw_api_base.startswith("https://") and ".persoia.com" in raw_api_base:
+        # Validate URL strictly — substring matches like ".persoia.com" in the
+        # raw string would accept https://evil.persoia.com.attacker.tld.
+        try:
+            parsed = urllib.parse.urlparse(raw_api_base)
+        except ValueError:
+            parsed = None
+        if (
+            parsed is not None
+            and parsed.scheme == "https"
+            and parsed.hostname is not None
+            and (
+                parsed.hostname == "persoia.com"
+                or parsed.hostname.endswith(".persoia.com")
+            )
+        ):
             api_base_from_api = raw_api_base
 
     # Save config — prefer api_base from API response (knows the correct environment URL)
@@ -1085,7 +1106,7 @@ def cmd_config(config: dict) -> None:
             try:
                 line_count = len(f.read_text(encoding="utf-8").splitlines())
                 print(f"  ↳ {f} ({line_count} lignes)")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 print(f"  ↳ {f} (illisible)")
     else:
         print("PERSOIA.md:     Aucun fichier trouvé dans l'arborescence")
@@ -1097,7 +1118,11 @@ def cmd_init() -> None:
     root = Path.cwd()
 
     # Reset terminal — aider or other tools may leave CR/LF translation broken
-    if sys.stdin.isatty() and platform.system() != "Windows":
+    if (
+        sys.stdin.isatty()
+        and platform.system() != "Windows"
+        and shutil.which("stty") is not None
+    ):
         subprocess.run(["stty", "sane"], check=False, stderr=subprocess.DEVNULL)
 
     # Check if PERSOIA.md already exists
@@ -1199,8 +1224,9 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = config["PERSOIA_API_KEY"]
 
-    # Use "persoia" as model name — the API resolves the actual model
-    # from the tenant's subscription. This avoids exposing internal
+    # Use "openai/persoia" — "openai" routes aider through its OpenAI-compatible
+    # provider against PERSOIA_API_BASE; "persoia" is the logical model name the
+    # API resolves to the tenant's actual subscription server-side. Hides internal
     # model paths and suppresses aider's "unknown model" warning.
     ctx_file = make_context_file()
     cmd = [

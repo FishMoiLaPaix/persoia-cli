@@ -7,9 +7,13 @@ Wrapper CLI souverain pour [PersoIA](https://www.persoia.com) — utilisez votre
 ### macOS (Apple Silicon)
 
 ```bash
+mkdir -p ~/.local/bin
 curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-darwin-arm64 \
   -o ~/.local/bin/persoia && chmod +x ~/.local/bin/persoia
 ```
+
+> Si `~/.local/bin` n'est pas dans votre `PATH` (cas par défaut sur macOS), ajoutez-le une fois pour toutes :
+> `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec $SHELL`
 
 > Premier lancement : macOS Gatekeeper bloque les binaires non signés. Lever la quarantaine :
 > `xattr -d com.apple.quarantine ~/.local/bin/persoia`
@@ -17,9 +21,15 @@ curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/p
 ### Linux (x64)
 
 ```bash
+mkdir -p ~/.local/bin
 curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-linux-x64 \
   -o ~/.local/bin/persoia && chmod +x ~/.local/bin/persoia
 ```
+
+> Si `~/.local/bin` n'est pas dans votre `PATH` :
+> `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && exec $SHELL`
+>
+> Alternative système-wide : déposer le binaire dans `/usr/local/bin/persoia` (sudo requis).
 
 ### Windows (x64)
 
@@ -28,8 +38,16 @@ New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\persoia"
 Invoke-WebRequest `
   -Uri "https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-windows-x64.exe" `
   -OutFile "$env:LOCALAPPDATA\persoia\persoia.exe"
-[Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$env:LOCALAPPDATA\persoia", "User")
+
+# Append to the User PATH (read User scope, not the merged $env:PATH which mixes System+User)
+$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+$cliDir   = "$env:LOCALAPPDATA\persoia"
+if ($userPath -notlike "*$cliDir*") {
+    [Environment]::SetEnvironmentVariable("PATH", "$userPath;$cliDir", "User")
+}
 ```
+
+> **Redémarrez votre terminal** après l'install : la session PowerShell courante n'hérite pas du nouveau PATH utilisateur.
 
 > Premier lancement : Windows SmartScreen avertit pour les binaires non signés. Cliquer "Plus d'infos" puis "Exécuter quand même".
 
