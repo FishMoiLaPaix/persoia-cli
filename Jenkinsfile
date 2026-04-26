@@ -63,7 +63,11 @@ pipeline {
                 }
 
                 stage('Windows x64') {
-                    agent { label 'windows-x64' }
+                    // Reuse the existing permanent node `windows-docker-agent`
+                    // (declared in k3d-cluster JCasC, provisioned by
+                    // jenkins-agents-ansible/playbooks/windows-agent.yml).
+                    // It already ships Python 3.13, so we just create a venv.
+                    agent { label 'windows-amd64' }
                     steps {
                         checkout scm
                         bat '''

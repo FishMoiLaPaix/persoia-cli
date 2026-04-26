@@ -97,9 +97,9 @@ Le source est intentionnellement un script Python standalone (zéro dépendance 
 ## CI/CD
 
 Build matrix Jenkins (`Jenkinsfile`) sur 3 plateformes :
-- `linux-x64` — agent Docker `python:3.12-slim`
-- `mac-arm64` — agent macOS dédié
-- `windows-x64` — agent Windows dédié
+- `linux-x64` — agent Docker `python:3.12-slim` (label `docker`)
+- `mac-arm64` — agent macOS dédié (label `mac-arm64`, à provisionner)
+- `windows-x64` — agent existant `windows-docker-agent` (label `windows-amd64`, Python 3.13 préinstallé)
 
 Une release GitHub est publiée automatiquement à chaque tag `v*.*.*`.
 
