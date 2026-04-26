@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local config
+.env
+config.env
+*.log
+
+# Claude
+.claude/
+CONTEXT.md
+
+# Test artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
