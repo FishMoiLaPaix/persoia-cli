@@ -4,7 +4,12 @@ pipeline {
     options {
         timeout(time: 30, unit: 'MINUTES')
         skipDefaultCheckout()
-        disableConcurrentBuilds()
+        // disableConcurrentBuilds() — temporarily removed: a previously
+        // aborted build (#2) left the controller's in-memory state thinking
+        // a build was still running, blocking all new triggers. Without
+        // hard-restarting the controller, dropping this option is the
+        // fastest way to unstick the queue. Re-enable in a follow-up once
+        // the controller is restarted.
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
