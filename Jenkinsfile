@@ -94,94 +94,88 @@ pipeline {
                 }
 
                 stage('macOS arm64') {
-                    agent { label 'mac-arm64' }
+                    // `agent none` at stage level + explicit `node('mac-arm64')`
+                    // INSIDE the timeout is the ONLY combo where a missing-agent
+                    // wait counts toward the timeout AND the
+                    // FlowInterruptedException is catchable. With `agent { label
+                    // 'mac-arm64' }` at stage level, the agent allocation happens
+                    // before the steps block runs, so a missing agent makes the
+                    // build pend forever (timeout step ticks on exec time only).
+                    agent none
                     steps {
-                        // catchError MUST wrap the timeout step (not the other
-                        // way round) — a stage-level `options { timeout }` raises
-                        // a FlowInterruptedException OUTSIDE the steps block, so
-                        // catchError never sees it and the pipeline still fails.
-                        // With timeout INSIDE catchError, the interruption is
-                        // caught and converted to UNSTABLE as intended.
                         catchError(
                             buildResult: 'UNSTABLE',
                             stageResult: 'FAILURE',
                             message: 'mac-arm64 agent unavailable or stage failed — Release stage (tag builds) will block on missing binary.'
                         ) {
                             timeout(time: 5, unit: 'MINUTES') {
-                                checkout scm
-                                sh '''
-                                    set -eu
-                                    python3 -m venv .venv
-                                    . .venv/bin/activate
-                                    pip install --upgrade pip
-                                    pip install -r requirements-build.txt
-                                    pyinstaller --clean --noconfirm persoia.spec
-                                    mv dist/persoia dist/persoia-darwin-arm64
-                                    BIN="$PWD/dist/persoia-darwin-arm64"
+                                node('mac-arm64') {
+                                    checkout scm
+                                    sh '''
+                                        set -eu
+                                        python3 -m venv .venv
+                                        . .venv/bin/activate
+                                        pip install --upgrade pip
+                                        pip install -r requirements-build.txt
+                                        pyinstaller --clean --noconfirm persoia.spec
+                                        mv dist/persoia dist/persoia-darwin-arm64
+                                        BIN="$PWD/dist/persoia-darwin-arm64"
 
-                                    "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
-                                    "$BIN" help    | grep -q "Assistant code souverain"
-                                    : > /tmp/empty.env
-                                    PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
-                                '''
-                                archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
-                                stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                        "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                                        "$BIN" help    | grep -q "Assistant code souverain"
+                                        : > /tmp/empty.env
+                                        PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+                                    '''
+                                    archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                    stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                }
                             }
                         }
                     }
                 }
 
                 stage('Windows x64') {
-                    // Reuse the existing permanent node `windows-docker-agent`
-                    // (declared in k3d-cluster JCasC, provisioned by
-                    // jenkins-agents-ansible/playbooks/windows-agent.yml).
-                    // The agent ships Python 3.13 but neither `python` nor
-                    // `py -3` resolves to it (the launcher reports "No
-                    // suitable Python runtime found"), so we discover it via
-                    // `where` against the common install layouts.
+                    // The windows-docker-agent only has Python 2.7 in PATH
+                    // (despite README claiming 3.13). Pull a portable CPython
+                    // 3.11 standalone build into the workspace, mirroring the
+                    // Linux stage. Self-contained, no admin rights needed.
                     agent { label 'windows-amd64' }
                     steps {
                         checkout scm
-                        bat '''
-                            REM Find a Python 3 interpreter the agent actually has
-                            for %%P in (
-                                "C:\\Python313\\python.exe"
-                                "C:\\Python312\\python.exe"
-                                "C:\\Python311\\python.exe"
-                                "C:\\Program Files\\Python313\\python.exe"
-                                "C:\\Program Files\\Python312\\python.exe"
-                                "C:\\Program Files\\Python311\\python.exe"
-                            ) do (
-                                if exist %%P (
-                                    set "PYTHON=%%~P"
-                                    goto :found
-                                )
-                            )
-                            where python >nul 2>&1 && (set "PYTHON=python") || (
-                                echo ERROR: no Python 3 found on this agent.
-                                echo Looked in C:\\Python313, C:\\Program Files\\Python313, ... and PATH.
-                                py --list 2>&1
-                                where python 2>&1
-                                where py 2>&1
-                                exit /b 1
-                            )
-                            :found
-                            echo Using Python at "%PYTHON%"
-                            "%PYTHON%" --version || exit /b 1
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+                            $PyVer = "3.11.10"
+                            $PyRelease = "20241016"
+                            $PyTar = "cpython-$PyVer+$PyRelease-x86_64-pc-windows-msvc-install_only.tar.gz"
+                            $Url = "https://github.com/astral-sh/python-build-standalone/releases/download/$PyRelease/$PyTar"
 
-                            "%PYTHON%" -m venv .venv || exit /b 1
-                            call .venv\\Scripts\\activate.bat || exit /b 1
-                            python -m pip install --upgrade pip || exit /b 1
-                            python -m pip install -r requirements-build.txt || exit /b 1
-                            python -m PyInstaller --clean --noconfirm persoia.spec || exit /b 1
-                            move dist\\persoia.exe dist\\persoia-windows-x64.exe || exit /b 1
-                            set BIN=dist\\persoia-windows-x64.exe
+                            Write-Host "Downloading portable CPython $PyVer ..."
+                            New-Item -ItemType Directory -Force -Path .python | Out-Null
+                            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile python.tar.gz
+                            tar -xzf python.tar.gz -C .python
+                            Remove-Item python.tar.gz
+                            $env:Path = "$PWD\\.python\\python;$env:Path"
+                            python --version
 
-                            %BIN% version | findstr /R "^persoia [0-9]" || exit /b 1
-                            %BIN% help    | findstr /C:"Assistant code souverain" || exit /b 1
-                            type NUL > %TEMP%\\empty.env
-                            set PERSOIA_CONFIG=%TEMP%\\empty.env
-                            %BIN% config  | findstr /C:"Non connect" || exit /b 1
+                            python -m venv .venv
+                            & ".venv\\Scripts\\Activate.ps1"
+                            python -m pip install --upgrade pip
+                            python -m pip install -r requirements-build.txt
+                            python -m PyInstaller --clean --noconfirm persoia.spec
+                            Move-Item dist\\persoia.exe dist\\persoia-windows-x64.exe
+                            $Bin = "dist\\persoia-windows-x64.exe"
+
+                            if (-not ((& $Bin version) -match "^persoia \\d+\\.\\d+\\.\\d+$")) {
+                                throw "version output did not match"
+                            }
+                            if (-not ((& $Bin help) -match "Assistant code souverain")) {
+                                throw "help text missing marker"
+                            }
+                            "" | Set-Content $env:TEMP\\empty.env
+                            $env:PERSOIA_CONFIG = "$env:TEMP\\empty.env"
+                            if (-not ((& $Bin config) -match "Non connect")) {
+                                throw "config did not report not-connected state"
+                            }
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-windows-x64.exe', fingerprint: true
                         stash name: 'binary-windows-x64', includes: 'dist/persoia-windows-x64.exe'
