@@ -76,10 +76,15 @@ pipeline {
                             python3 tests/mock_api.py --port 8765 &
                             MOCK_PID=$!
                             trap "kill $MOCK_PID 2>/dev/null || true" EXIT
+                            ready=0
                             for _ in 1 2 3 4 5; do
-                                python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/v1/models', timeout=2)" 2>/dev/null && break
+                                if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/v1/models', timeout=2)" 2>/dev/null; then
+                                    ready=1
+                                    break
+                                fi
                                 sleep 1
                             done
+                            [ "$ready" = "1" ] || { echo "ERROR: tests/mock_api.py never became ready on :8765"; exit 1; }
                             : > /tmp/login.env
                             PERSOIA_CONFIG=/tmp/login.env \
                             PERSOIA_API_BASE=http://127.0.0.1:8765/v1 \

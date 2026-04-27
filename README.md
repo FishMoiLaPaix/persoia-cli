@@ -97,9 +97,9 @@ Le source est intentionnellement un script Python standalone (zéro dépendance 
 ## CI/CD
 
 Build matrix Jenkins (`Jenkinsfile`) sur 3 plateformes :
-- `linux-x64` — agent Docker `python:3.12-slim` (label `docker`)
-- `mac-arm64` — agent macOS dédié (label `mac-arm64`, à provisionner)
-- `windows-x64` — agent existant `windows-docker-agent` (label `windows-amd64`, Python 3.13 préinstallé)
+- `linux-x64` — cloud-template agent (label `python311`, Ubuntu 22.04 + Python 3.11 ; le build pull en plus une distrib portable Python 3.11 d'`python-build-standalone` pour avoir `libpython3.11.so` dont PyInstaller a besoin)
+- `mac-arm64` — agent macOS dédié (label `mac-arm64`, à provisionner ; les PR builds tolèrent l'absence de l'agent — le tag-build hard-fail au stage Release sur l'unstash manquant)
+- `windows-x64` — agent permanent `windows-docker-agent` (label `windows-amd64` ; le build pull une distrib portable CPython 3.11 dans le workspace car l'agent n'a que Python 2.7 dans le PATH)
 
 Une release GitHub est publiée automatiquement à chaque tag `v*.*.*`.
 

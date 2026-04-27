@@ -1036,7 +1036,10 @@ def cmd_login(args: list[str]) -> None:
     if isinstance(config_data, dict):
         model = model or config_data.get("model", "")
         tenant_name = tenant_name or config_data.get("tenant_name", "")
-        raw_api_base = config_data.get("api_base", "").strip()
+        # `dict.get(k, default)` only returns the default when k is missing,
+        # not when its value is null. The login API may legitimately send
+        # `"api_base": null`, so coerce explicitly before .strip().
+        raw_api_base = (config_data.get("api_base") or "").strip()
         # Validate URL strictly — substring matches like ".persoia.com" in the
         # raw string would accept https://evil.persoia.com.attacker.tld.
         try:
@@ -1147,7 +1150,12 @@ def cmd_init() -> None:
     # Check if PERSOIA.md already exists
     persoia_md = root / "PERSOIA.md"
     if persoia_md.exists():
-        line_count = len(persoia_md.read_text(encoding="utf-8").splitlines())
+        try:
+            line_count = len(persoia_md.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeDecodeError):
+            # A corrupt/non-UTF-8 PERSOIA.md must not abort `persoia init`
+            # before the user can opt to overwrite it (the recovery path).
+            line_count = 0
         print(f"PERSOIA.md existe déjà ({line_count} lignes).")
         try:
             sys.stdout.flush()
