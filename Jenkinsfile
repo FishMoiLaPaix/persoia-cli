@@ -94,41 +94,48 @@ pipeline {
                 }
 
                 stage('macOS arm64') {
-                    // `agent none` at stage level + explicit `node('mac-arm64')`
-                    // INSIDE the timeout is the ONLY combo where a missing-agent
-                    // wait counts toward the timeout AND the
-                    // FlowInterruptedException is catchable. With `agent { label
-                    // 'mac-arm64' }` at stage level, the agent allocation happens
-                    // before the steps block runs, so a missing agent makes the
-                    // build pend forever (timeout step ticks on exec time only).
+                    // `agent none` at stage level + `node('mac-arm64')` INSIDE
+                    // the timeout is the only way for a missing-agent wait to
+                    // count toward the timeout (otherwise the timeout step
+                    // only ticks on exec time, not on queue wait).
+                    //
+                    // `catchError` alone does NOT downgrade a timeout-induced
+                    // ABORTED back to UNSTABLE — Jenkins sets the build result
+                    // before catchError runs. Use an explicit script-level
+                    // try/catch + `currentBuild.result = 'UNSTABLE'` to
+                    // override.
                     agent none
                     steps {
-                        catchError(
-                            buildResult: 'UNSTABLE',
-                            stageResult: 'FAILURE',
-                            message: 'mac-arm64 agent unavailable or stage failed — Release stage (tag builds) will block on missing binary.'
-                        ) {
-                            timeout(time: 5, unit: 'MINUTES') {
-                                node('mac-arm64') {
-                                    checkout scm
-                                    sh '''
-                                        set -eu
-                                        python3 -m venv .venv
-                                        . .venv/bin/activate
-                                        pip install --upgrade pip
-                                        pip install -r requirements-build.txt
-                                        pyinstaller --clean --noconfirm persoia.spec
-                                        mv dist/persoia dist/persoia-darwin-arm64
-                                        BIN="$PWD/dist/persoia-darwin-arm64"
+                        script {
+                            try {
+                                timeout(time: 5, unit: 'MINUTES') {
+                                    node('mac-arm64') {
+                                        checkout scm
+                                        sh '''
+                                            set -eu
+                                            python3 -m venv .venv
+                                            . .venv/bin/activate
+                                            pip install --upgrade pip
+                                            pip install -r requirements-build.txt
+                                            pyinstaller --clean --noconfirm persoia.spec
+                                            mv dist/persoia dist/persoia-darwin-arm64
+                                            BIN="$PWD/dist/persoia-darwin-arm64"
 
-                                        "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
-                                        "$BIN" help    | grep -q "Assistant code souverain"
-                                        : > /tmp/empty.env
-                                        PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
-                                    '''
-                                    archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
-                                    stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                            "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                                            "$BIN" help    | grep -q "Assistant code souverain"
+                                            : > /tmp/empty.env
+                                            PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+                                        '''
+                                        archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                        stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                    }
                                 }
+                            } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException e) {
+                                echo 'mac-arm64 agent unavailable or build exceeded 5 min — marking UNSTABLE so the rest of the matrix can still gate the merge. Tag builds will hard-fail at the Release stage when the missing binary stash is unstashed.'
+                                currentBuild.result = 'UNSTABLE'
+                            } catch (err) {
+                                echo "mac-arm64 stage failed: ${err}"
+                                currentBuild.result = 'UNSTABLE'
                             }
                         }
                     }
