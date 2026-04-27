@@ -54,6 +54,11 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0") or 0)
             if length:
                 self.rfile.read(length)
+            # Note: we intentionally omit `config.api_base` from the response.
+            # The CLI's allowlist only accepts api_base values whose hostname
+            # is persoia.com (or a subdomain), so any 127.0.0.1 URL we return
+            # here would be silently dropped — better not to suggest otherwise.
+            # The CI script keeps PERSOIA_API_BASE on env to point at the mock.
             self._send(
                 200,
                 {
@@ -62,10 +67,6 @@ class Handler(BaseHTTPRequestHandler):
                         "api_key": MOCK_API_KEY,
                         "tenant_name": MOCK_TENANT_NAME,
                         "model": MOCK_MODEL_ID,
-                        "config": {
-                            # Reuse the same mock host so subsequent calls stay local.
-                            "api_base": f"http://127.0.0.1:{self.server.server_address[1]}/v1",
-                        },
                     },
                 },
             )
