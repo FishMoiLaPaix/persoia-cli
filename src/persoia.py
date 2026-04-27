@@ -101,7 +101,13 @@ def load_config() -> dict:
 
     config_path = get_config_path()
     if config_path.exists():
-        for line in config_path.read_text(encoding="utf-8").splitlines():
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # A corrupted/non-UTF-8 config.env must not crash recovery commands
+            # like `persoia logout` or `persoia config` before main() can dispatch.
+            raw = ""
+        for line in raw.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -887,11 +893,24 @@ def _make_raw_template(scan: dict) -> str:
 # --- Commands ---
 
 def _open_cli_page(config: dict) -> None:
-    """Open the CLI settings page in the browser as fallback."""
+    """Open the CLI settings page in the browser as fallback.
+
+    The user-facing portal lives at chat.persoia.com (frontend Vue/Quasar),
+    not at api.persoia.com (backend Go). Derive the portal host from the
+    API host by mapping the `api.` prefix to `chat.`; on demo the host
+    already starts with `demo.chat.`, so it is preserved as-is.
+    """
     api_base = config.get("PERSOIA_API_BASE", "https://api.persoia.com/v1")
-    # Derive the portal URL from the API base
-    portal_url = api_base.replace("/v1", "").replace("/api", "")
-    cli_url = f"{portal_url}/cli"
+    parsed = urllib.parse.urlparse(api_base)
+    host = (parsed.hostname or "api.persoia.com").lower()
+    if host.startswith("api."):
+        portal_host = "chat." + host[len("api."):]
+    elif host.startswith("chat.") or ".chat." in host:
+        portal_host = host
+    else:
+        # Fall back to the production portal — better than a 404.
+        portal_host = "chat.persoia.com"
+    cli_url = f"https://{portal_host}/cli"
     print()
     print(f"Ouverture de {cli_url} dans votre navigateur...")
     print("Créez une clé API depuis le portail, puis configurez-la avec :")

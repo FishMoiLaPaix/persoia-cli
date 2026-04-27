@@ -8,7 +8,7 @@ Wrapper CLI souverain pour [PersoIA](https://www.persoia.com) — utilisez votre
 
 ```bash
 mkdir -p ~/.local/bin
-curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-darwin-arm64 \
+curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-darwin-arm64 \
   -o ~/.local/bin/persoia && chmod +x ~/.local/bin/persoia
 ```
 
@@ -22,7 +22,7 @@ curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/p
 
 ```bash
 mkdir -p ~/.local/bin
-curl -sL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-linux-x64 \
+curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-linux-x64 \
   -o ~/.local/bin/persoia && chmod +x ~/.local/bin/persoia
 ```
 
