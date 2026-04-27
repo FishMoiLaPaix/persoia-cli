@@ -135,17 +135,41 @@ pipeline {
                     // Reuse the existing permanent node `windows-docker-agent`
                     // (declared in k3d-cluster JCasC, provisioned by
                     // jenkins-agents-ansible/playbooks/windows-agent.yml).
-                    // It already ships Python 3.13, but `python` may not be on
-                    // the cmd.exe PATH — use the `py` launcher (always at
-                    // C:\Windows\py.exe) and `python -m pip` instead of bare
-                    // `pip`. Each step is followed by `|| exit /b 1` because
-                    // legacy bat scripts don't fail-fast otherwise (the build
-                    // marched past a missing python silently last time).
+                    // The agent ships Python 3.13 but neither `python` nor
+                    // `py -3` resolves to it (the launcher reports "No
+                    // suitable Python runtime found"), so we discover it via
+                    // `where` against the common install layouts.
                     agent { label 'windows-amd64' }
                     steps {
                         checkout scm
                         bat '''
-                            py -3 -m venv .venv || exit /b 1
+                            REM Find a Python 3 interpreter the agent actually has
+                            for %%P in (
+                                "C:\\Python313\\python.exe"
+                                "C:\\Python312\\python.exe"
+                                "C:\\Python311\\python.exe"
+                                "C:\\Program Files\\Python313\\python.exe"
+                                "C:\\Program Files\\Python312\\python.exe"
+                                "C:\\Program Files\\Python311\\python.exe"
+                            ) do (
+                                if exist %%P (
+                                    set "PYTHON=%%~P"
+                                    goto :found
+                                )
+                            )
+                            where python >nul 2>&1 && (set "PYTHON=python") || (
+                                echo ERROR: no Python 3 found on this agent.
+                                echo Looked in C:\\Python313, C:\\Program Files\\Python313, ... and PATH.
+                                py --list 2>&1
+                                where python 2>&1
+                                where py 2>&1
+                                exit /b 1
+                            )
+                            :found
+                            echo Using Python at "%PYTHON%"
+                            "%PYTHON%" --version || exit /b 1
+
+                            "%PYTHON%" -m venv .venv || exit /b 1
                             call .venv\\Scripts\\activate.bat || exit /b 1
                             python -m pip install --upgrade pip || exit /b 1
                             python -m pip install -r requirements-build.txt || exit /b 1
