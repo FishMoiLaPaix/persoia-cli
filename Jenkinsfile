@@ -95,42 +95,38 @@ pipeline {
 
                 stage('macOS arm64') {
                     agent { label 'mac-arm64' }
-                    // Fail fast if no mac-arm64 agent is available (the
-                    // MacBook Pro might be offline or not yet provisioned).
-                    // Tag builds will still hard-fail at the Release stage
-                    // because the binary stash will be missing, so we don't
-                    // accidentally publish an incomplete release.
-                    options { timeout(time: 5, unit: 'MINUTES') }
                     steps {
-                        // PR builds tolerate a missing mac binary (UNSTABLE
-                        // instead of FAILURE) so the rest of the matrix can
-                        // still gate the merge. The Release stage downstream
-                        // will hard-fail on `unstash` when no Mac binary is
-                        // available, which is the desired behaviour for
-                        // tag builds.
+                        // catchError MUST wrap the timeout step (not the other
+                        // way round) — a stage-level `options { timeout }` raises
+                        // a FlowInterruptedException OUTSIDE the steps block, so
+                        // catchError never sees it and the pipeline still fails.
+                        // With timeout INSIDE catchError, the interruption is
+                        // caught and converted to UNSTABLE as intended.
                         catchError(
                             buildResult: 'UNSTABLE',
                             stageResult: 'FAILURE',
                             message: 'mac-arm64 agent unavailable or stage failed — Release stage (tag builds) will block on missing binary.'
                         ) {
-                            checkout scm
-                            sh '''
-                                set -eu
-                                python3 -m venv .venv
-                                . .venv/bin/activate
-                                pip install --upgrade pip
-                                pip install -r requirements-build.txt
-                                pyinstaller --clean --noconfirm persoia.spec
-                                mv dist/persoia dist/persoia-darwin-arm64
-                                BIN="$PWD/dist/persoia-darwin-arm64"
+                            timeout(time: 5, unit: 'MINUTES') {
+                                checkout scm
+                                sh '''
+                                    set -eu
+                                    python3 -m venv .venv
+                                    . .venv/bin/activate
+                                    pip install --upgrade pip
+                                    pip install -r requirements-build.txt
+                                    pyinstaller --clean --noconfirm persoia.spec
+                                    mv dist/persoia dist/persoia-darwin-arm64
+                                    BIN="$PWD/dist/persoia-darwin-arm64"
 
-                                "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
-                                "$BIN" help    | grep -q "Assistant code souverain"
-                                : > /tmp/empty.env
-                                PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
-                            '''
-                            archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
-                            stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                    "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                                    "$BIN" help    | grep -q "Assistant code souverain"
+                                    : > /tmp/empty.env
+                                    PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+                                '''
+                                archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                            }
                         }
                     }
                 }
