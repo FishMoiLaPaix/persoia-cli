@@ -17,6 +17,25 @@ pipeline {
     stages {
         stage('Build matrix') {
             parallel {
+                stage('Source lint') {
+                    // Fast feedback: catch syntax errors / obvious typos before
+                    // any (slow) PyInstaller stage runs.
+                    agent {
+                        docker {
+                            image 'python:3.12-slim'
+                            label 'docker'
+                            args '-u root --entrypoint=""'
+                        }
+                    }
+                    steps {
+                        checkout scm
+                        sh '''
+                            set -eu
+                            python -m py_compile src/persoia.py tests/mock_api.py
+                        '''
+                    }
+                }
+
                 stage('Linux x64') {
                     agent {
                         docker {
@@ -30,13 +49,42 @@ pipeline {
                         sh '''
                             set -eu
                             apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-                                binutils upx-ucl
+                                binutils upx-ucl curl
                             python -m venv /tmp/venv
                             . /tmp/venv/bin/activate
                             pip install --no-cache-dir -r requirements-build.txt
                             pyinstaller --clean --noconfirm persoia.spec
                             mv dist/persoia dist/persoia-linux-x64
-                            ./dist/persoia-linux-x64 version
+                            BIN="$PWD/dist/persoia-linux-x64"
+
+                            # --- Smoke tests: binary works end-to-end without network ---
+                            "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                            "$BIN" help    | grep -q "Assistant code souverain"
+                            # `config` reads PERSOIA_CONFIG; point it at an empty file so we test
+                            # the "not connected" path independently of any host-leaked state.
+                            : > /tmp/empty.env
+                            PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+
+                            # --- Smoke test: login path against a mock API ---
+                            # `chat` and `code` shell out to aider, so we cover the
+                            # only urllib-driven command instead. The mock returns a
+                            # canned api_key + tenant_name + model; we then verify
+                            # persoia persisted them to the config file and that
+                            # `config` reads them back as "connected".
+                            python3 tests/mock_api.py --port 8765 &
+                            MOCK_PID=$!
+                            trap "kill $MOCK_PID 2>/dev/null || true" EXIT
+                            for _ in 1 2 3 4 5; do
+                                curl -fsS http://127.0.0.1:8765/v1/models >/dev/null 2>&1 && break
+                                sleep 1
+                            done
+                            : > /tmp/login.env
+                            PERSOIA_CONFIG=/tmp/login.env \
+                            PERSOIA_API_BASE=http://127.0.0.1:8765/v1 \
+                                "$BIN" login --email ci@example.com --password fake
+                            grep -q "PERSOIA_API_KEY=persoia_demo_sk_mock_login_ci" /tmp/login.env
+                            grep -q "PERSOIA_TENANT_NAME=Mock Tenant" /tmp/login.env
+                            PERSOIA_CONFIG=/tmp/login.env "$BIN" config | grep -q "Clé API:"
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-linux-x64', fingerprint: true
                         stash name: 'binary-linux-x64', includes: 'dist/persoia-linux-x64'
@@ -55,7 +103,12 @@ pipeline {
                             pip install -r requirements-build.txt
                             pyinstaller --clean --noconfirm persoia.spec
                             mv dist/persoia dist/persoia-darwin-arm64
-                            ./dist/persoia-darwin-arm64 version
+                            BIN="$PWD/dist/persoia-darwin-arm64"
+
+                            "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                            "$BIN" help    | grep -q "Assistant code souverain"
+                            : > /tmp/empty.env
+                            PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
                         stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
@@ -77,7 +130,13 @@ pipeline {
                             pip install -r requirements-build.txt
                             pyinstaller --clean --noconfirm persoia.spec
                             move dist\\persoia.exe dist\\persoia-windows-x64.exe
-                            dist\\persoia-windows-x64.exe version
+                            set BIN=dist\\persoia-windows-x64.exe
+
+                            %BIN% version | findstr /R "^persoia [0-9]" || exit /b 1
+                            %BIN% help    | findstr /C:"Assistant code souverain" || exit /b 1
+                            type NUL > %TEMP%\\empty.env
+                            set PERSOIA_CONFIG=%TEMP%\\empty.env
+                            %BIN% config  | findstr /C:"Non connect" || exit /b 1
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-windows-x64.exe', fingerprint: true
                         stash name: 'binary-windows-x64', includes: 'dist/persoia-windows-x64.exe'
