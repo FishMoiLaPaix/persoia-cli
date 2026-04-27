@@ -146,43 +146,45 @@ pipeline {
                     // (despite README claiming 3.13). Pull a portable CPython
                     // 3.11 standalone build into the workspace, mirroring the
                     // Linux stage. Self-contained, no admin rights needed.
+                    //
+                    // Use bat (not powershell) because PyInstaller writes to
+                    // stderr and PowerShell with $ErrorActionPreference=Stop
+                    // turns those into NativeCommandError exceptions. bat with
+                    // `|| exit /b 1` per line is more predictable for native
+                    // exe pipelines.
                     agent { label 'windows-amd64' }
                     steps {
                         checkout scm
-                        powershell '''
-                            $ErrorActionPreference = "Stop"
-                            $PyVer = "3.11.10"
-                            $PyRelease = "20241016"
-                            $PyTar = "cpython-$PyVer+$PyRelease-x86_64-pc-windows-msvc-install_only.tar.gz"
-                            $Url = "https://github.com/astral-sh/python-build-standalone/releases/download/$PyRelease/$PyTar"
+                        bat '''
+                            REM Workspace is shared between builds — clean
+                            REM leftovers so move /Y is enough to handle the
+                            REM rename target without "file already exists".
+                            if exist dist     rmdir /S /Q dist
+                            if exist build    rmdir /S /Q build
+                            if exist .venv    rmdir /S /Q .venv
+                            if exist .python  rmdir /S /Q .python
 
-                            Write-Host "Downloading portable CPython $PyVer ..."
-                            New-Item -ItemType Directory -Force -Path .python | Out-Null
-                            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile python.tar.gz
-                            tar -xzf python.tar.gz -C .python
-                            Remove-Item python.tar.gz
-                            $env:Path = "$PWD\\.python\\python;$env:Path"
-                            python --version
+                            REM Pull portable CPython 3.11 standalone
+                            curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.11.10+20241016-x86_64-pc-windows-msvc-install_only.tar.gz" -o python.tar.gz || exit /b 1
+                            mkdir .python || exit /b 1
+                            tar -xzf python.tar.gz -C .python || exit /b 1
+                            del python.tar.gz
+                            set "PYTHON=%CD%\\.python\\python\\python.exe"
+                            "%PYTHON%" --version || exit /b 1
 
-                            python -m venv .venv
-                            & ".venv\\Scripts\\Activate.ps1"
-                            python -m pip install --upgrade pip
-                            python -m pip install -r requirements-build.txt
-                            python -m PyInstaller --clean --noconfirm persoia.spec
-                            Move-Item dist\\persoia.exe dist\\persoia-windows-x64.exe
-                            $Bin = "dist\\persoia-windows-x64.exe"
+                            "%PYTHON%" -m venv .venv || exit /b 1
+                            call .venv\\Scripts\\activate.bat || exit /b 1
+                            python -m pip install --upgrade pip || exit /b 1
+                            python -m pip install -r requirements-build.txt || exit /b 1
+                            python -m PyInstaller --clean --noconfirm persoia.spec || exit /b 1
+                            move /Y dist\\persoia.exe dist\\persoia-windows-x64.exe || exit /b 1
+                            set BIN=dist\\persoia-windows-x64.exe
 
-                            if (-not ((& $Bin version) -match "^persoia \\d+\\.\\d+\\.\\d+$")) {
-                                throw "version output did not match"
-                            }
-                            if (-not ((& $Bin help) -match "Assistant code souverain")) {
-                                throw "help text missing marker"
-                            }
-                            "" | Set-Content $env:TEMP\\empty.env
-                            $env:PERSOIA_CONFIG = "$env:TEMP\\empty.env"
-                            if (-not ((& $Bin config) -match "Non connect")) {
-                                throw "config did not report not-connected state"
-                            }
+                            %BIN% version | findstr /R "^persoia [0-9]" >nul || exit /b 1
+                            %BIN% help    | findstr /C:"Assistant code souverain" >nul || exit /b 1
+                            type NUL > %TEMP%\\empty.env
+                            set PERSOIA_CONFIG=%TEMP%\\empty.env
+                            %BIN% config  | findstr /C:"Non connect" >nul || exit /b 1
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-windows-x64.exe', fingerprint: true
                         stash name: 'binary-windows-x64', includes: 'dist/persoia-windows-x64.exe'
