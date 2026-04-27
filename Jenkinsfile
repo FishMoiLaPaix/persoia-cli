@@ -19,38 +19,26 @@ pipeline {
             parallel {
                 stage('Source lint') {
                     // Fast feedback: catch syntax errors / obvious typos before
-                    // any (slow) PyInstaller stage runs.
-                    agent {
-                        docker {
-                            image 'python:3.12-slim'
-                            label 'docker'
-                            args '-u root --entrypoint=""'
-                        }
-                    }
+                    // any (slow) PyInstaller stage runs. Uses the existing
+                    // ubuntu-multi-tool-agent cloud template (jnlp jenkins user,
+                    // Python 3.11 preinstalled).
+                    agent { label 'python311' }
                     steps {
                         checkout scm
                         sh '''
                             set -eu
-                            python -m py_compile src/persoia.py tests/mock_api.py
+                            python3 -m py_compile src/persoia.py tests/mock_api.py
                         '''
                     }
                 }
 
                 stage('Linux x64') {
-                    agent {
-                        docker {
-                            image 'python:3.12-slim'
-                            label 'docker'
-                            args '-u root --entrypoint=""'
-                        }
-                    }
+                    agent { label 'python311' }
                     steps {
                         checkout scm
                         sh '''
                             set -eu
-                            apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-                                binutils upx-ucl curl
-                            python -m venv /tmp/venv
+                            python3 -m venv /tmp/venv
                             . /tmp/venv/bin/activate
                             pip install --no-cache-dir -r requirements-build.txt
                             pyinstaller --clean --noconfirm persoia.spec
@@ -66,16 +54,11 @@ pipeline {
                             PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
 
                             # --- Smoke test: login path against a mock API ---
-                            # `chat` and `code` shell out to aider, so we cover the
-                            # only urllib-driven command instead. The mock returns a
-                            # canned api_key + tenant_name + model; we then verify
-                            # persoia persisted them to the config file and that
-                            # `config` reads them back as "connected".
                             python3 tests/mock_api.py --port 8765 &
                             MOCK_PID=$!
                             trap "kill $MOCK_PID 2>/dev/null || true" EXIT
                             for _ in 1 2 3 4 5; do
-                                curl -fsS http://127.0.0.1:8765/v1/models >/dev/null 2>&1 && break
+                                python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/v1/models', timeout=2)" 2>/dev/null && break
                                 sleep 1
                             done
                             : > /tmp/login.env
@@ -148,14 +131,7 @@ pipeline {
         stage('Release') {
             // Only when a tag like v1.2.3 was pushed and discovered by multibranch
             when { expression { return env.RELEASE_TAG?.startsWith('v') } }
-            agent {
-                docker {
-                    // Ships gh CLI; no host apt/sudo dependency.
-                    image 'maniator/gh:latest'
-                    label 'docker'
-                    args '--entrypoint=""'
-                }
-            }
+            agent { label 'python311' }
             steps {
                 checkout scm
                 unstash 'binary-linux-x64'
@@ -164,6 +140,14 @@ pipeline {
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
+                        # Self-contained gh CLI install — the Jenkins agent runs as
+                        # an unprivileged jnlp user, so we can't apt-get. Download
+                        # the standalone tarball into the workspace instead.
+                        GH_VERSION="2.65.0"
+                        curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+                            | tar xz
+                        export PATH="$PWD/gh_${GH_VERSION}_linux_amd64/bin:$PATH"
+                        gh --version
 
                         # Create the release if it does not exist yet (idempotent).
                         if ! gh release view "${RELEASE_TAG}" --repo FishMoiLaPaix/persoia-cli >/dev/null 2>&1; then
