@@ -43,6 +43,20 @@ pipeline {
                         checkout scm
                         sh '''
                             set -eu
+                            # The cloud agent's system /usr/bin/python3 is 3.10 built
+                            # without --enable-shared, which makes PyInstaller bail
+                            # with `Python library not found: libpython3.10.so.1.0`.
+                            # Pull a portable CPython 3.11 standalone build from
+                            # python-build-standalone (Astral) — these include the
+                            # shared libpython3.11.so PyInstaller needs.
+                            PY_VER=3.11.10
+                            PY_RELEASE=20241016
+                            PY_TAR="cpython-${PY_VER}+${PY_RELEASE}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+                            curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/download/${PY_RELEASE}/${PY_TAR}" \
+                                | tar xz -C /tmp
+                            export PATH="/tmp/python/bin:$PATH"
+                            python3 --version
+
                             python3 -m venv /tmp/venv
                             . /tmp/venv/bin/activate
                             pip install --no-cache-dir -r requirements-build.txt
@@ -125,17 +139,22 @@ pipeline {
                     // Reuse the existing permanent node `windows-docker-agent`
                     // (declared in k3d-cluster JCasC, provisioned by
                     // jenkins-agents-ansible/playbooks/windows-agent.yml).
-                    // It already ships Python 3.13, so we just create a venv.
+                    // It already ships Python 3.13, but `python` may not be on
+                    // the cmd.exe PATH — use the `py` launcher (always at
+                    // C:\Windows\py.exe) and `python -m pip` instead of bare
+                    // `pip`. Each step is followed by `|| exit /b 1` because
+                    // legacy bat scripts don't fail-fast otherwise (the build
+                    // marched past a missing python silently last time).
                     agent { label 'windows-amd64' }
                     steps {
                         checkout scm
                         bat '''
-                            python -m venv .venv
-                            call .venv\\Scripts\\activate.bat
-                            python -m pip install --upgrade pip
-                            pip install -r requirements-build.txt
-                            pyinstaller --clean --noconfirm persoia.spec
-                            move dist\\persoia.exe dist\\persoia-windows-x64.exe
+                            py -3 -m venv .venv || exit /b 1
+                            call .venv\\Scripts\\activate.bat || exit /b 1
+                            python -m pip install --upgrade pip || exit /b 1
+                            python -m pip install -r requirements-build.txt || exit /b 1
+                            python -m PyInstaller --clean --noconfirm persoia.spec || exit /b 1
+                            move dist\\persoia.exe dist\\persoia-windows-x64.exe || exit /b 1
                             set BIN=dist\\persoia-windows-x64.exe
 
                             %BIN% version | findstr /R "^persoia [0-9]" || exit /b 1
@@ -163,9 +182,8 @@ pipeline {
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
-                        # Self-contained gh CLI install — the Jenkins agent runs as
-                        # an unprivileged jnlp user, so we can't apt-get. Download
-                        # the standalone tarball into the workspace instead.
+                        # Release stage doesn't need PyInstaller, just gh CLI to
+                        # upload artifacts. Self-contained download (no apt/sudo).
                         GH_VERSION="2.65.0"
                         curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
                             | tar xz
