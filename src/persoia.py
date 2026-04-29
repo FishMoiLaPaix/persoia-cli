@@ -8,7 +8,7 @@ Usage:
     persoia login [--email EMAIL --password PASSWORD]
     persoia logout
     persoia init
-    persoia code [FILES...] [-y] [--no-discover] [aider args...]
+    persoia code [FILES...] [-y/--yes] [--no-discover] [aider args...]
     persoia chat "message"
     persoia config
     persoia version [--version, -V]
@@ -1282,14 +1282,36 @@ def cmd_init() -> None:
     print("Ce fichier sera automatiquement injecté dans 'persoia code'.")
 
 
-def _classify_code_args(extra_args: list[str]) -> tuple[list[str], list[str]]:
-    """Split `persoia code <args>` into (aider_flags, file_paths).
+# Path segments that should never appear in an auto-added file's path,
+# regardless of the leaf filename. Catches `subdir/.aws/credentials` even
+# though the leaf is `credentials` (which by itself is innocuous).
+_FORBIDDEN_PATH_PARTS = frozenset({
+    ".aws", ".gcp", ".azure", ".ssh", ".gnupg", ".gpg",
+    ".env", ".secret", ".secrets", "secrets",
+    ".git",  # tooling artifacts: aider already owns its own diffs
+    ".ssh-keys", ".kube", ".docker",
+})
 
-    Heuristic: anything starting with `-` (or following a flag that takes a
-    value, such as `--model X`) is forwarded to aider verbatim. Everything
-    else is treated as a candidate file path that we will resolve, validate
-    against the cwd boundary, and pass to aider via `--file` after creating
-    missing files.
+
+def _classify_code_args(
+    extra_args: list[str],
+) -> tuple[list[str], list[str], dict[str, bool]]:
+    """Split `persoia code <args>` into (aider_flags, file_paths, persoia_flags).
+
+    Three buckets:
+
+    - `aider_flags`: tokens forwarded verbatim to aider, including any
+      values consumed by known flags (e.g. `--message X`).
+    - `file_paths`: bare positional tokens treated as candidate paths.
+    - `persoia_flags`: dict of persoia-owned switches (`auto_yes`,
+      `no_discover`) detected at the top level only — never when they
+      appear as the value of a previous aider flag.
+
+    The third bucket replaces an earlier list-comprehension pre-filter
+    that stripped `-y`/`--yes`/`--no-discover` unconditionally, which
+    would have eaten `persoia code --message -y` (turning the literal
+    aider message "-y" into a persoia auto-confirm). Sequential parsing
+    consumes value tokens correctly.
     """
     # Aider flags that consume the next token as a value. Conservative — we
     # err on the side of forwarding ambiguous tokens to aider rather than
@@ -1304,13 +1326,20 @@ def _classify_code_args(extra_args: list[str]) -> tuple[list[str], list[str]]:
         "--read", "--file", "--message", "--message-file",
         "--commit-prompt", "--gui-port",
     })
+    persoia_bool_flags = frozenset({"-y", "--yes", "--no-discover"})
 
     aider_flags: list[str] = []
     file_paths: list[str] = []
+    persoia_flags = {"auto_yes": False, "no_discover": False}
     i = 0
     while i < len(extra_args):
         tok = extra_args[i]
-        if tok.startswith("-"):
+        if tok in persoia_bool_flags:
+            if tok in ("-y", "--yes"):
+                persoia_flags["auto_yes"] = True
+            else:  # --no-discover
+                persoia_flags["no_discover"] = True
+        elif tok.startswith("-"):
             aider_flags.append(tok)
             # Forward `--flag value` pairs intact when the flag is known to
             # consume a value. `--flag=value` is already self-contained.
@@ -1321,16 +1350,28 @@ def _classify_code_args(extra_args: list[str]) -> tuple[list[str], list[str]]:
         else:
             file_paths.append(tok)
         i += 1
-    return aider_flags, file_paths
+    return aider_flags, file_paths, persoia_flags
 
 
 def _resolve_safe_file(candidate: str, cwd: Path) -> Path | None:
     """Resolve a user-supplied path and refuse anything escaping the cwd.
 
-    Returns the resolved Path if it stays under `cwd`, else None. Path
-    traversal (`../`) is the obvious threat, but absolute paths and symlinks
-    pointing outside the project are equally rejected. Mirrors the SSRF
-    hostname guard used in resolve_api_base.
+    Cwd-bound semantics: any path that resolves to a location under
+    `cwd` is accepted, regardless of how the user wrote it (relative
+    `foo.py`, dotted `./foo.py`, absolute `/abs/path/under/cwd/foo.py`,
+    or via a symlink that lands inside cwd). Anything escaping the cwd
+    via `..`, an absolute path outside cwd, or a symlink pointing
+    outside is rejected.
+
+    Defense-in-depth on top of the cwd boundary:
+
+    - The leaf filename is checked against `_FORBIDDEN_NAMES` (.env,
+      lock files, private keys).
+    - Each path segment between cwd and the leaf is checked against
+      `_FORBIDDEN_PATH_PARTS` so that `subdir/.aws/credentials` is
+      refused even though `credentials` is innocuous as a leaf name.
+
+    Returns the resolved Path on success, None on any rejection.
     """
     try:
         resolved = (cwd / candidate).resolve()
@@ -1338,18 +1379,30 @@ def _resolve_safe_file(candidate: str, cwd: Path) -> Path | None:
     except (OSError, RuntimeError):
         return None
     try:
-        resolved.relative_to(cwd_resolved)
+        relative = resolved.relative_to(cwd_resolved)
     except ValueError:
         return None
     if resolved.name in _FORBIDDEN_NAMES:
+        return None
+    if any(part in _FORBIDDEN_PATH_PARTS for part in relative.parts):
         return None
     return resolved
 
 
 def _confirm(prompt: str, default_yes: bool, auto_yes: bool) -> bool:
-    """Prompt the user for a yes/no answer, falling back to default on EOF.
+    """Prompt the user for a yes/no answer.
 
-    auto_yes short-circuits to True. Used for non-interactive flows.
+    Behavior:
+
+    - `auto_yes=True` short-circuits to True (used for `-y` / `--yes`
+      and other scripted flows).
+    - Empty input returns `default_yes` (the user pressed Enter).
+    - On `EOFError` or `KeyboardInterrupt` (broken pipe, Ctrl+C, no
+      stdin) the function returns False — *not* `default_yes`. This is
+      an intentional safety choice: a broken interactive prompt should
+      refuse rather than silently auto-confirm an action that may
+      create files or accept additions on the user's behalf. Callers
+      that need the default-on-EOF semantics should set `auto_yes`.
     """
     if auto_yes:
         return True
@@ -1412,13 +1465,20 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
     require_api_key(config)
     require_aider()
 
-    # Pull out our own flags before we hand the rest to the classifier.
-    no_discover = "--no-discover" in extra_args
-    auto_yes = "--yes" in extra_args or "-y" in extra_args
-    extra_args = [a for a in extra_args if a not in ("--no-discover", "--yes", "-y")]
+    # `_classify_code_args` returns persoia switches in its third tuple
+    # element — sequential parsing avoids stripping `-y` / `--no-discover`
+    # when they appear as the value of an aider flag (`--message -y`).
+    aider_flags, file_paths, persoia_flags = _classify_code_args(extra_args)
+    auto_yes = persoia_flags["auto_yes"]
+    no_discover = persoia_flags["no_discover"]
 
-    aider_flags, file_paths = _classify_code_args(extra_args)
+    # `cwd_resolved` is the canonical base for both safety checks and
+    # display: `_collect_project_files` walks `cwd.resolve()`, so showing
+    # results via `f.relative_to(Path.cwd())` would `ValueError` whenever
+    # cwd is itself a symlink (Stephane's macOS often is — `/Users` ↔
+    # `/Users/.../private/var`).
     cwd = Path.cwd()
+    cwd_resolved = cwd.resolve()
 
     # Resolve, validate, and (with confirmation) create user-supplied paths.
     # We keep the absolute resolved path in the aider command — aider handles
@@ -1453,11 +1513,14 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
     # If no file paths were supplied, optionally auto-discover sources.
     discovered: list[Path] = []
     if not resolved_files and not no_discover and sys.stdin.isatty():
-        discovered = _collect_project_files(cwd)
+        discovered = _collect_project_files(cwd_resolved)
         if discovered:
-            print(f"Découverte automatique : {len(discovered)} fichier(s) source dans {cwd.name}.")
+            print(
+                f"Découverte automatique : {len(discovered)} fichier(s) source "
+                f"dans {cwd_resolved.name}."
+            )
             for f in discovered[:5]:
-                rel = f.relative_to(cwd)
+                rel = f.relative_to(cwd_resolved)
                 print(f"  • {rel}")
             if len(discovered) > 5:
                 print(f"  • … et {len(discovered) - 5} autre(s)")
@@ -1544,15 +1607,15 @@ Usage:
   persoia login                    Connexion avec email et mot de passe
   persoia logout                   Déconnexion (supprime la clé API locale)
   persoia init                     Génère un fichier PERSOIA.md pour le projet
-  persoia code [FILES...] [-y] [--no-discover] [AIDER_ARGS...]
+  persoia code [FILES...] [-y/--yes] [--no-discover] [AIDER_ARGS...]
                                    Lance aider avec l'infrastructure PersoIA.
                                    Les chemins de fichiers passés en arguments
                                    sont ajoutés à la session aider (--file).
                                    Si un fichier listé n'existe pas, persoia
-                                   propose de le créer (sauf avec -y qui auto-
-                                   confirme). Sans aucun fichier, persoia scanne
-                                   le répertoire et propose les sources trouvées
-                                   (désactivable avec --no-discover).
+                                   propose de le créer (sauf avec -y/--yes qui
+                                   auto-confirme). Sans aucun fichier, persoia
+                                   scanne le répertoire et propose les sources
+                                   trouvées (désactivable avec --no-discover).
   persoia chat "message"           Mode chat rapide (une question)
   persoia config                   Affiche la configuration active
   persoia version (--version, -V)  Affiche la version du CLI
