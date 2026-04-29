@@ -33,6 +33,50 @@ pipeline {
                         sh '''
                             set -eu
                             python3 -m py_compile src/persoia.py tests/mock_api.py
+
+                            # --- Source-level: the cmd_code helpers must reject
+                            # path traversal and forbidden names. Validating at
+                            # lint-time avoids needing an interactive aider in CI.
+                            python3 - <<'PY'
+import sys, tempfile, shutil
+sys.path.insert(0, "src")
+import persoia
+
+# Argument classifier: distinguishes aider flags from file paths
+flags, files = persoia._classify_code_args(["foo.py", "--model", "x", "bar.go"])
+assert files == ["foo.py", "bar.go"], f"unexpected files: {files}"
+assert "--model" in flags and "x" in flags
+
+# Path safety: cwd-bound, refuses traversal and forbidden names
+tmp = tempfile.mkdtemp()
+try:
+    cwd = persoia.Path(tmp)
+    (cwd / "ok.txt").touch()
+    assert persoia._resolve_safe_file("ok.txt", cwd) is not None
+    assert persoia._resolve_safe_file("../../etc/passwd", cwd) is None
+    assert persoia._resolve_safe_file("/etc/passwd", cwd) is None
+    assert persoia._resolve_safe_file(".env", cwd) is None
+finally:
+    shutil.rmtree(tmp)
+
+# Project scan honors excluded dirs, dotfiles, size cap
+tmp = tempfile.mkdtemp()
+try:
+    cwd = persoia.Path(tmp)
+    (cwd / "real.py").write_text("x")
+    (cwd / "node_modules").mkdir()
+    (cwd / "node_modules" / "ignored.js").write_text("y")
+    (cwd / ".env").write_text("SECRET=x")
+    found = persoia._collect_project_files(cwd)
+    names = {p.name for p in found}
+    assert "real.py" in names
+    assert "ignored.js" not in names
+    assert ".env" not in names
+finally:
+    shutil.rmtree(tmp)
+
+print("OK: cmd_code helpers reject unsafe paths and respect excludes")
+PY
                         '''
                     }
                 }

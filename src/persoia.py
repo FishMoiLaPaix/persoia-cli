@@ -8,7 +8,7 @@ Usage:
     persoia login [--email EMAIL --password PASSWORD]
     persoia logout
     persoia init
-    persoia code [aider args...]
+    persoia code [FILES...] [-y] [--no-discover] [aider args...]
     persoia chat "message"
     persoia config
     persoia version [--version, -V]
@@ -278,6 +278,45 @@ _EXCLUDED_DIRS = frozenset({
     "target", ".venv", "venv", ".next", ".nuxt", ".quasar", ".astro",
     ".cache", ".output", "coverage",
 })
+
+# Source file extensions worth auto-adding to a `persoia code` session.
+# Deliberately exclude dotfiles, env files, lock files, binaries, and large
+# media — auto-add must not leak secrets into the model context.
+_SOURCE_EXTS = frozenset({
+    ".py", ".go", ".rs", ".java", ".kt", ".swift", ".rb", ".php",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".m", ".mm",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".html", ".css", ".scss", ".sass", ".less",
+    ".sql", ".graphql", ".proto",
+    ".yaml", ".yml", ".toml", ".json", ".xml",
+    ".md", ".rst", ".adoc",
+    ".txt", ".log", ".conf", ".cfg", ".ini",
+    ".dockerfile", ".tf", ".hcl",
+    ".groovy", ".gradle", ".sbt", ".lua", ".pl",
+    ".r", ".jl", ".scala", ".clj", ".ex", ".exs",
+})
+
+# File names worth adding even without a recognized extension.
+_SOURCE_NAMES = frozenset({
+    "Dockerfile", "Makefile", "Jenkinsfile", "Vagrantfile", "Procfile",
+    "Rakefile", "Gemfile", "Pipfile", "Brewfile", "Justfile",
+    "CMakeLists.txt", "BUILD.bazel", "WORKSPACE",
+})
+
+# Always refused for auto-add: secrets, lock files, binaries, generated bulk.
+_FORBIDDEN_NAMES = frozenset({
+    ".env", ".env.local", ".env.production", ".env.development",
+    "credentials.json", ".credentials.json", ".aws", ".gcp",
+    "id_rsa", "id_ed25519", "id_ecdsa",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+    "Cargo.lock", "Pipfile.lock", "poetry.lock", "uv.lock",
+    "go.sum",
+})
+
+# Hard cap on auto-discovery to keep the model's context window healthy.
+_MAX_DISCOVER_FILES = 20
+_MAX_FILE_SIZE_BYTES = 200_000  # 200 KB — anything larger usually a generated artifact
 
 GENERATION_PROMPT = """\
 Tu es un assistant technique. Génère un fichier PERSOIA.md concis (100-150 lignes max) pour un projet de développement logiciel.
@@ -1243,10 +1282,189 @@ def cmd_init() -> None:
     print("Ce fichier sera automatiquement injecté dans 'persoia code'.")
 
 
+def _classify_code_args(extra_args: list[str]) -> tuple[list[str], list[str]]:
+    """Split `persoia code <args>` into (aider_flags, file_paths).
+
+    Heuristic: anything starting with `-` (or following a flag that takes a
+    value, such as `--model X`) is forwarded to aider verbatim. Everything
+    else is treated as a candidate file path that we will resolve, validate
+    against the cwd boundary, and pass to aider via `--file` after creating
+    missing files.
+    """
+    # Aider flags that consume the next token as a value. Conservative — we
+    # err on the side of forwarding ambiguous tokens to aider rather than
+    # mis-classifying one as a file.
+    flags_with_value = frozenset({
+        "--model", "--edit-format", "--map-tokens", "--map-refresh",
+        "--openai-api-base", "--openai-api-key", "--openai-api-type",
+        "--openai-api-version", "--openai-api-deployment-id",
+        "--openai-organization-id",
+        "--input-history-file", "--chat-history-file",
+        "--llm-history-file", "--encoding", "--restore-chat-history",
+        "--read", "--file", "--message", "--message-file",
+        "--commit-prompt", "--gui-port",
+    })
+
+    aider_flags: list[str] = []
+    file_paths: list[str] = []
+    i = 0
+    while i < len(extra_args):
+        tok = extra_args[i]
+        if tok.startswith("-"):
+            aider_flags.append(tok)
+            # Forward `--flag value` pairs intact when the flag is known to
+            # consume a value. `--flag=value` is already self-contained.
+            if tok in flags_with_value and "=" not in tok and i + 1 < len(extra_args):
+                aider_flags.append(extra_args[i + 1])
+                i += 2
+                continue
+        else:
+            file_paths.append(tok)
+        i += 1
+    return aider_flags, file_paths
+
+
+def _resolve_safe_file(candidate: str, cwd: Path) -> Path | None:
+    """Resolve a user-supplied path and refuse anything escaping the cwd.
+
+    Returns the resolved Path if it stays under `cwd`, else None. Path
+    traversal (`../`) is the obvious threat, but absolute paths and symlinks
+    pointing outside the project are equally rejected. Mirrors the SSRF
+    hostname guard used in resolve_api_base.
+    """
+    try:
+        resolved = (cwd / candidate).resolve()
+        cwd_resolved = cwd.resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        resolved.relative_to(cwd_resolved)
+    except ValueError:
+        return None
+    if resolved.name in _FORBIDDEN_NAMES:
+        return None
+    return resolved
+
+
+def _confirm(prompt: str, default_yes: bool, auto_yes: bool) -> bool:
+    """Prompt the user for a yes/no answer, falling back to default on EOF.
+
+    auto_yes short-circuits to True. Used for non-interactive flows.
+    """
+    if auto_yes:
+        return True
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    try:
+        answer = input(f"{prompt} {suffix} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not answer:
+        return default_yes
+    return answer in ("y", "yes", "o", "oui")
+
+
+def _collect_project_files(cwd: Path, max_files: int = _MAX_DISCOVER_FILES) -> list[Path]:
+    """Walk cwd for source files worth proposing to the user.
+
+    Filters: excluded dirs, dotfiles, forbidden names (.env, lock files,
+    private keys), files larger than _MAX_FILE_SIZE_BYTES. Sorts by mtime
+    descending so recently-touched files surface first.
+    """
+    candidates: list[tuple[float, Path]] = []
+    cwd_resolved = cwd.resolve()
+    for root, dirs, files in os.walk(cwd_resolved):
+        # In-place edit so os.walk skips excluded subtrees and dotted dirs
+        dirs[:] = [
+            d for d in dirs
+            if d not in _EXCLUDED_DIRS and not d.startswith(".")
+        ]
+        root_path = Path(root)
+        for fname in files:
+            if fname.startswith("."):
+                continue
+            if fname in _FORBIDDEN_NAMES:
+                continue
+            ext = Path(fname).suffix.lower()
+            if ext not in _SOURCE_EXTS and fname not in _SOURCE_NAMES:
+                continue
+            fpath = root_path / fname
+            try:
+                stat = fpath.stat()
+            except OSError:
+                continue
+            if stat.st_size > _MAX_FILE_SIZE_BYTES:
+                continue
+            candidates.append((stat.st_mtime, fpath))
+
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return [p for _, p in candidates[:max_files]]
+
+
 def cmd_code(config: dict, extra_args: list[str]) -> None:
-    """Launch aider with PersoIA infrastructure."""
+    """Launch aider with PersoIA infrastructure.
+
+    Handles file paths in `extra_args`: paths that exist are added as
+    editable; paths that don't exist trigger a confirmation to create
+    (unless `--yes`). Refuses any path escaping the cwd. With no file
+    paths, scans the cwd for source files and proposes adding them.
+    """
     require_api_key(config)
     require_aider()
+
+    # Pull out our own flags before we hand the rest to the classifier.
+    no_discover = "--no-discover" in extra_args
+    auto_yes = "--yes" in extra_args or "-y" in extra_args
+    extra_args = [a for a in extra_args if a not in ("--no-discover", "--yes", "-y")]
+
+    aider_flags, file_paths = _classify_code_args(extra_args)
+    cwd = Path.cwd()
+
+    # Resolve, validate, and (with confirmation) create user-supplied paths.
+    # We keep the absolute resolved path in the aider command — aider handles
+    # absolute paths fine and we avoid surprises with relative-to-where lookups.
+    resolved_files: list[Path] = []
+    for candidate in file_paths:
+        target = _resolve_safe_file(candidate, cwd)
+        if target is None:
+            print(
+                f"Refusé : {candidate} sort du répertoire courant ou est un fichier sensible.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if target.exists():
+            if target.is_dir():
+                print(f"Ignoré : {candidate} est un dossier, pas un fichier.", file=sys.stderr)
+                continue
+            resolved_files.append(target)
+            continue
+        # File doesn't exist — offer to create.
+        if _confirm(f"{candidate} n'existe pas. Le créer ?", default_yes=True, auto_yes=auto_yes):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch()
+                resolved_files.append(target)
+            except OSError as e:
+                print(f"Impossible de créer {candidate} : {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(f"Ignoré : {candidate}", file=sys.stderr)
+
+    # If no file paths were supplied, optionally auto-discover sources.
+    discovered: list[Path] = []
+    if not resolved_files and not no_discover and sys.stdin.isatty():
+        discovered = _collect_project_files(cwd)
+        if discovered:
+            print(f"Découverte automatique : {len(discovered)} fichier(s) source dans {cwd.name}.")
+            for f in discovered[:5]:
+                rel = f.relative_to(cwd)
+                print(f"  • {rel}")
+            if len(discovered) > 5:
+                print(f"  • … et {len(discovered) - 5} autre(s)")
+            if not _confirm(
+                "Les ajouter à la session ?", default_yes=True, auto_yes=auto_yes,
+            ):
+                discovered = []
 
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = config["PERSOIA_API_KEY"]
@@ -1269,7 +1487,12 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
     for md_file in collect_persoia_md_files():
         cmd.extend(["--read", str(md_file)])
 
-    cmd.extend(extra_args)
+    # Editable files: user-specified (created if missing) + auto-discovered.
+    for f in resolved_files + discovered:
+        cmd.extend(["--file", str(f)])
+
+    # Forward any leftover aider flags (e.g. --message-file, --edit-format).
+    cmd.extend(aider_flags)
 
     try:
         result = subprocess.run(cmd, env=env)
@@ -1321,7 +1544,15 @@ Usage:
   persoia login                    Connexion avec email et mot de passe
   persoia logout                   Déconnexion (supprime la clé API locale)
   persoia init                     Génère un fichier PERSOIA.md pour le projet
-  persoia code [AIDER_ARGS...]     Lance aider avec l'infrastructure PersoIA
+  persoia code [FILES...] [-y] [--no-discover] [AIDER_ARGS...]
+                                   Lance aider avec l'infrastructure PersoIA.
+                                   Les chemins de fichiers passés en arguments
+                                   sont ajoutés à la session aider (--file).
+                                   Si un fichier listé n'existe pas, persoia
+                                   propose de le créer (sauf avec -y qui auto-
+                                   confirme). Sans aucun fichier, persoia scanne
+                                   le répertoire et propose les sources trouvées
+                                   (désactivable avec --no-discover).
   persoia chat "message"           Mode chat rapide (une question)
   persoia config                   Affiche la configuration active
   persoia version (--version, -V)  Affiche la version du CLI
@@ -1334,10 +1565,17 @@ Exemples:
   persoia login                           # Connexion interactive
   persoia login --email user@example.com  # Email en paramètre
   persoia init                            # Génère PERSOIA.md pour le projet
-  persoia code                            # Lance aider
+  persoia code                            # Lance aider, propose les sources du cwd
+  persoia code --no-discover              # Lance aider sans découverte automatique
+  persoia code main.py utils.py           # Ajoute 2 fichiers existants
+  persoia code -y nouveau.log             # Crée nouveau.log et l'ajoute
   persoia chat "Explique ce Dockerfile"   # Question rapide
   persoia config                          # Vérifie la configuration
   persoia logout                          # Déconnexion
+
+Astuce dans aider :
+  Une fois en session, '/add fichier.py' ajoute un fichier à la volée,
+  '/drop fichier.py' le retire, '/help' liste toutes les slash-commands.
 
 Configuration:
   Fichier: """ + str(get_config_path()) + """
