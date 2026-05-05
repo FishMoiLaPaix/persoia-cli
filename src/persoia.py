@@ -260,6 +260,24 @@ LANGUE_DIRECTIVE = (
     "doit être en français."
 )
 
+# Identity directive injected into the runtime context file. Prevents the
+# underlying open-weight model (Qwen 3.5 27B Q4 on demo, others on tenant
+# instances) from hallucinating its identity — observed live: Qwen claimed
+# to be "an AI assistant developed by Anthropic, based on Claude" because
+# its training data includes copious Claude references. The user-visible
+# product is PersoIA; the model identity below the API surface is an
+# implementation detail that should not be named to end users.
+IDENTITE_DIRECTIVE = (
+    "**Tu es PersoIA**, l'assistant code souverain de la plateforme du même "
+    "nom. Si l'utilisateur te demande quel modèle ou quelle entreprise se "
+    "trouve derrière toi, réponds : « Je suis PersoIA, un assistant code "
+    "souverain hébergé sur infrastructure française. Le modèle sous-jacent "
+    "fait partie de l'abonnement et n'est pas exposé. » Ne te présente "
+    "JAMAIS comme Claude, GPT, Gemini, Qwen, Llama, Mistral ou tout autre "
+    "modèle. N'attribue ton existence à aucune entreprise tierce (Anthropic, "
+    "OpenAI, Google, Meta, etc.)."
+)
+
 
 _LANGUE_SECTION_RE = re.compile(
     # Anchors on the start of a line, captures everything up to the next
@@ -304,12 +322,20 @@ def _ensure_langue_section(content: str) -> str:
 
 
 def make_context_file() -> str:
-    """Create a temporary context file with the language directive, date, and OS.
+    """Create a temporary context file with identity, language, date, and OS.
 
-    Injected as a read-only file so the model knows it must answer in French
-    — PersoIA targets French SMEs and the underlying open-weight models
-    default to English without an explicit directive — and so it has the
-    current datetime / OS info for any time-sensitive request.
+    Injected as a read-only file at the start of every aider session so the
+    model has:
+
+    - An identity directive to prevent open-weight models from hallucinating
+      they are Claude/GPT/Gemini/etc. (Qwen does this because its training
+      data is full of Claude transcripts). The user-visible product is
+      PersoIA; the underlying model is an implementation detail.
+    - A language directive setting French as the response language for prose
+      (a redundant safety net — `--chat-language french` passed to aider is
+      the primary enforcement; this block sets the project tone for prose
+      the model emits about the code).
+    - Current datetime / OS metadata for any time-sensitive request.
 
     Returns the path (auto-deleted on process exit).
     """
@@ -317,6 +343,8 @@ def make_context_file() -> str:
     tz = now.astimezone().tzname()
     content = (
         "# PersoIA Context\n"
+        "\n"
+        f"## Identité\n\n{IDENTITE_DIRECTIVE}\n"
         "\n"
         f"## Langue\n\n{LANGUE_DIRECTIVE}\n"
         "\n"
