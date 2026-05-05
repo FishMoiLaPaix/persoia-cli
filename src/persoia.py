@@ -249,6 +249,42 @@ def require_aider() -> None:
         sys.exit(1)
 
 
+# Cached feature probe. `aider --help` runs once per persoia process and is
+# expensive enough (~1s) to be worth memoizing across cmd_code/cmd_chat
+# invocations, but cheap enough that we don't need a dedicated cache file.
+_AIDER_FEATURES: dict[str, bool] | None = None
+
+
+def aider_supports(flag: str) -> bool:
+    """Check whether the installed aider exposes a given flag.
+
+    Used as a feature gate: PersoIA passes `--chat-language french` to force
+    French responses, but very old aider builds (pre-0.50) don't accept the
+    flag and would refuse to start. Probing once with `aider --help` lets us
+    fall back gracefully (warn the user, drop the flag, keep going) instead
+    of failing the whole `persoia code` invocation.
+    """
+    global _AIDER_FEATURES
+    if _AIDER_FEATURES is None:
+        _AIDER_FEATURES = {}
+        try:
+            result = subprocess.run(
+                ["aider", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            help_text = (result.stdout or "") + (result.stderr or "")
+            # Cheap presence checks — substring suffices, no need to parse argparse output.
+            for f in ("--chat-language", "--commit-language"):
+                _AIDER_FEATURES[f] = f in help_text
+        except (subprocess.SubprocessError, OSError):
+            # If aider --help itself fails, we can't probe — assume features
+            # are absent and let the caller fall back rather than crash.
+            pass
+    return _AIDER_FEATURES.get(flag, False)
+
+
 # Single source of truth for the French language directive. Every path that
 # produces a context file or PERSOIA.md goes through this constant, so a
 # wording change here propagates without drift across runtime context
@@ -1401,6 +1437,11 @@ def _classify_code_args(
         "--llm-history-file", "--encoding", "--restore-chat-history",
         "--read", "--file", "--message", "--message-file",
         "--commit-prompt", "--gui-port",
+        # Language flags consume a value too. Without this, a user who
+        # writes `persoia code --chat-language english main.py` would have
+        # `english` mis-classified as a file path (created on disk!) while
+        # aider receives `--chat-language` with no value.
+        "--chat-language", "--commit-language",
     })
     persoia_bool_flags = frozenset({"-y", "--yes", "--no-discover"})
 
@@ -1427,6 +1468,28 @@ def _classify_code_args(
             file_paths.append(tok)
         i += 1
     return aider_flags, file_paths, persoia_flags
+
+
+def _strip_flag_with_value(flags: list[str], flag: str) -> list[str]:
+    """Remove every occurrence of a value-taking flag from a forwarded args list.
+
+    Used when PersoIA forces a specific value for a flag (e.g. `--chat-language
+    french`) and wants to preempt any user override that would otherwise reach
+    aider as a duplicate. Handles both `--flag value` and `--flag=value`.
+    """
+    out: list[str] = []
+    skip_next = False
+    for tok in flags:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == flag:
+            skip_next = True
+            continue
+        if tok.startswith(flag + "="):
+            continue
+        out.append(tok)
+    return out
 
 
 def _resolve_safe_file(candidate: str, cwd: Path) -> Path | None:
@@ -1621,6 +1684,23 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
         "--no-git",
         "--read", ctx_file,
     ]
+    # `--chat-language` rewrites aider's own system prompt so the model is
+    # instructed in French at the root, dominating aider's English default
+    # system prompt that otherwise outweighs read-only context directives.
+    # Feature-gated: pre-0.50 aider builds reject the flag and would refuse
+    # to start. PersoIA also strips any user-provided `--chat-language`
+    # from the forwarded flags — language is a product opinion here, not
+    # a user knob.
+    aider_flags = _strip_flag_with_value(aider_flags, "--chat-language")
+    if aider_supports("--chat-language"):
+        cmd.extend(["--chat-language", "french"])
+    else:
+        print(
+            "Avertissement : aider est trop ancien pour --chat-language. "
+            "Mettez à jour avec `pip install --upgrade aider-chat` pour des "
+            "réponses en français garanties.",
+            file=sys.stderr,
+        )
 
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
     for md_file in collect_persoia_md_files():
@@ -1658,6 +1738,18 @@ def cmd_chat(config: dict, message: str) -> None:
         "--no-show-model-warnings",
         "--read", ctx_file,
     ]
+    # See cmd_code for the rationale and the feature-gate strategy. cmd_chat
+    # has no user-supplied flags to strip (it takes a single message arg,
+    # not an aider passthrough), so just gate on aider_supports.
+    if aider_supports("--chat-language"):
+        cmd.extend(["--chat-language", "french"])
+    else:
+        print(
+            "Avertissement : aider est trop ancien pour --chat-language. "
+            "Mettez à jour avec `pip install --upgrade aider-chat` pour des "
+            "réponses en français garanties.",
+            file=sys.stderr,
+        )
 
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
     for md_file in collect_persoia_md_files():

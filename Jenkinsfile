@@ -84,6 +84,29 @@ if persoia_flags["auto_yes"]:
 if flags != ["--message", "-y"]:
     fail(f"-y not preserved as flag value: {flags}")
 
+# `--chat-language english main.py`: language is a value-taking aider flag,
+# its value must NOT be mis-classified as a file path (creating the file
+# was the failure mode Copilot caught on PR #5).
+flags, files, persoia_flags = persoia._classify_code_args(
+    ["--chat-language", "english", "main.py"]
+)
+if files != ["main.py"]:
+    fail(f"--chat-language value mis-classified as file: files={files}")
+if flags != ["--chat-language", "english"]:
+    fail(f"--chat-language value not forwarded intact: flags={flags}")
+
+# _strip_flag_with_value removes both `--flag value` and `--flag=value`
+out = persoia._strip_flag_with_value(
+    ["--chat-language", "english", "--model", "x"], "--chat-language"
+)
+if out != ["--model", "x"]:
+    fail(f"_strip_flag_with_value space form: {out}")
+out = persoia._strip_flag_with_value(
+    ["--chat-language=english", "--model", "x"], "--chat-language"
+)
+if out != ["--model", "x"]:
+    fail(f"_strip_flag_with_value equals form: {out}")
+
 # Path safety: cwd-bound (absolute paths under cwd OK), refuses traversal,
 # refuses leaf names AND segments in forbidden lists.
 tmp = tempfile.mkdtemp()
