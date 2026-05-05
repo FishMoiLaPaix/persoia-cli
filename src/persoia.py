@@ -1619,6 +1619,14 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
         "--openai-api-base", config["PERSOIA_API_BASE"],
         "--no-show-model-warnings",
         "--no-git",
+        # `--chat-language` rewrites aider's own system prompt so the model
+        # is instructed in French. Without it, the read-only directive in
+        # the temp ctx file gets dominated by aider's English-by-default
+        # system prompt — observed live: model thinks aloud "I'll respond
+        # in English as instructed". Belt-and-suspenders with the temp
+        # file's `## Langue` block (which still sets the project tone for
+        # any prose the model emits about the code).
+        "--chat-language", "french",
         "--read", ctx_file,
     ]
 
@@ -1656,6 +1664,10 @@ def cmd_chat(config: dict, message: str) -> None:
         "--message", message,
         "--no-auto-commits",
         "--no-show-model-warnings",
+        # See cmd_code: aider's `--chat-language` is the only reliable way
+        # to force French — the ctx file directive alone gets overridden
+        # by aider's English system prompt.
+        "--chat-language", "french",
         "--read", ctx_file,
     ]
 
