@@ -34,9 +34,24 @@ pipeline {
                             set -eu
                             python3 -m py_compile src/persoia.py tests/mock_api.py
 
-                            # --- Source-level: the cmd_code helpers must reject
-                            # path traversal and forbidden names. Validating at
-                            # lint-time avoids needing an interactive aider in CI.
+                            # --- Source-level: two complementary suites in one
+                            # heredoc so the lint stage stays a single fast
+                            # invocation. (1) cmd_code helpers reject path
+                            # traversal and forbidden names; (2) the French
+                            # language directive must land in the auto-injected
+                            # context file AND in any PERSOIA.md produced by the
+                            # offline persoia init template.
+                            #
+                            # Both suites use explicit raise SystemExit (not
+                            # bare assert): the latter is stripped under
+                            # python -O, which would let silent regressions
+                            # through CI. Both also use chr(10) and string ops
+                            # rather than regex with backslashes, because
+                            # Groovy parses backslash escape sequences inside
+                            # sh triple-single-quoted blocks at pipeline
+                            # compile time, and unknown escapes (like the
+                            # regex end-of-string anchor) abort the build
+                            # before bash ever runs.
                             python3 - <<'PY'
 import sys, tempfile, shutil
 sys.path.insert(0, "src")
@@ -46,6 +61,8 @@ import persoia
 def fail(msg):
     raise SystemExit("LINT FAIL: " + msg)
 
+
+# === Suite 1: cmd_code helpers ===
 
 # Argument classifier returns (aider_flags, file_paths, persoia_flags).
 # Persoia-owned flags must be detected at top level only — never as the
@@ -77,8 +94,6 @@ try:
     (cwd / ".aws" / "credentials").write_text("nope")
     if persoia._resolve_safe_file("ok.txt", cwd) is None:
         fail("relative ok.txt rejected")
-    # Absolute path under cwd: ALLOWED (clarification of finding #3 — the
-    # rule is cwd-bound, not "no absolute paths".)
     if persoia._resolve_safe_file(str(cwd / "ok.txt"), cwd) is None:
         fail("absolute path under cwd rejected")
     if persoia._resolve_safe_file("../../etc/passwd", cwd) is not None:
@@ -112,6 +127,69 @@ finally:
     shutil.rmtree(tmp)
 
 print("OK: cmd_code helpers reject unsafe paths and parse flags safely")
+
+
+# === Suite 2: French language directive ===
+
+ctx_path = persoia.make_context_file()
+with open(ctx_path, encoding="utf-8") as f:
+    body = f.read()
+if "## Langue" not in body:
+    fail("make_context_file: missing Langue section" + chr(10) + body)
+if persoia.LANGUE_DIRECTIVE not in body:
+    fail("make_context_file: directive mismatch with LANGUE_DIRECTIVE" + chr(10) + body)
+
+# Offline _make_raw_template path must also carry the directive once
+# wrapped through _ensure_langue_section (the cmd_init save site).
+raw = persoia._make_raw_template({
+    "name": "test", "description": "", "languages": [], "frameworks": [],
+    "package_manager": "", "directories": [], "commands": {},
+})
+final = persoia._ensure_langue_section(raw)
+if "## Langue" not in final or persoia.LANGUE_DIRECTIVE not in final:
+    fail("offline path: _ensure_langue_section did not inject directive" + chr(10) + final)
+
+# Wrong-body case: the Langue heading exists with paraphrased text, and
+# the canonical directive appears elsewhere in the document. The previous
+# "in content" implementation returned unchanged; the normalizer must
+# replace the section body with LANGUE_DIRECTIVE.
+poisoned_lines = [
+    "# Test",
+    "",
+    "## Langue",
+    "",
+    "Respond in English please.",
+    "",
+    "## Examples",
+    "",
+    "Some quote: " + persoia.LANGUE_DIRECTIVE,
+    "",
+]
+poisoned = "".join(line + chr(10) for line in poisoned_lines)
+healed = persoia._ensure_langue_section(poisoned)
+
+
+def section_body(text, header):
+    marker = header + chr(10)
+    idx = text.find(marker)
+    if idx < 0:
+        return ""
+    rest = text[idx + len(marker):]
+    next_heading = rest.find(chr(10) + "## ")
+    return rest if next_heading < 0 else rest[:next_heading]
+
+
+sec = section_body(healed, "## Langue")
+if persoia.LANGUE_DIRECTIVE not in sec:
+    fail("_ensure_langue_section did not heal a poisoned Langue body" + chr(10) + healed)
+if "Respond in English" in sec:
+    fail("_ensure_langue_section left bad text inside the Langue body" + chr(10) + healed)
+
+twice = persoia._ensure_langue_section(healed)
+if twice != healed:
+    fail("_ensure_langue_section not idempotent")
+
+print("OK: French directive guaranteed (incl. wrong-body normalization)")
 PY
                         '''
                     }

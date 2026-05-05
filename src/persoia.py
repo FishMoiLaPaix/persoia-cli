@@ -249,20 +249,83 @@ def require_aider() -> None:
         sys.exit(1)
 
 
-def make_context_file() -> str:
-    """Create a temporary context file with current date/time.
+# Single source of truth for the French language directive. Every path that
+# produces a context file or PERSOIA.md goes through this constant, so a
+# wording change here propagates without drift across runtime context
+# injection and `persoia init` generation.
+LANGUE_DIRECTIVE = (
+    "**Toujours répondre en français.** Le code et les identifiants restent "
+    "en anglais (variables, fonctions, commits, commentaires de code), mais "
+    "toute prose, explication, message d'erreur ou réponse conversationnelle "
+    "doit être en français."
+)
 
-    Injected as a read-only file so the model knows the current datetime.
+
+_LANGUE_SECTION_RE = re.compile(
+    # Anchors on the start of a line, captures everything up to the next
+    # `##`/`#` heading (or end of doc). The leading newline is part of the
+    # match so we can replace the section cleanly.
+    r"(^|\n)## Langue[^\n]*\n.*?(?=\n#{1,2} |\Z)",
+    re.DOTALL,
+)
+
+
+def _ensure_langue_section(content: str) -> str:
+    """Guarantee a `## Langue` section carrying the canonical LANGUE_DIRECTIVE.
+
+    `cmd_init` has two generation paths: an LLM-driven `generate_persoia_md`
+    that honors the prompt's "section obligatoire" rule, and an offline
+    `_make_raw_template` fallback (used when the user is not logged in or
+    the API call fails). The fallback path has no way to honor a prompt
+    rule, so the directive must be injected post-hoc to keep the contract.
+
+    Document-wide substring checks (the previous implementation) gave a
+    false guarantee: an LLM could emit `## Langue` followed by paraphrased
+    or empty body, and quote LANGUE_DIRECTIVE elsewhere (e.g. in a code
+    block of an examples section), passing both `in content` checks while
+    leaving the section itself wrong. This implementation locates the
+    section by header and rewrites the section body to the canonical block,
+    so a wrong-body section is normalized rather than silently accepted.
+
+    Idempotent: if the section already contains the canonical block
+    verbatim, the function is a no-op (modulo trailing-newline trim).
+    """
+    canonical_block = f"## Langue\n\n{LANGUE_DIRECTIVE}\n"
+    match = _LANGUE_SECTION_RE.search(content)
+    if match:
+        # Skip the leading newline that the regex captures so we keep the
+        # original separator the LLM produced before the heading.
+        start = match.start()
+        if content[start:start + 1] == "\n":
+            start += 1
+        rewritten = content[:start] + canonical_block + content[match.end():]
+        return rewritten.rstrip() + "\n"
+    return content.rstrip() + "\n\n" + canonical_block
+
+
+def make_context_file() -> str:
+    """Create a temporary context file with the language directive, date, and OS.
+
+    Injected as a read-only file so the model knows it must answer in French
+    — PersoIA targets French SMEs and the underlying open-weight models
+    default to English without an explicit directive — and so it has the
+    current datetime / OS info for any time-sensitive request.
+
     Returns the path (auto-deleted on process exit).
     """
     now = datetime.now()
     tz = now.astimezone().tzname()
     content = (
-        f"# PersoIA Context\n"
-        f"Date: {now.strftime('%Y-%m-%d')}\n"
-        f"Heure: {now.strftime('%H:%M')}\n"
-        f"Fuseau: {tz}\n"
-        f"OS: {platform.system()} {platform.machine()}\n"
+        "# PersoIA Context\n"
+        "\n"
+        f"## Langue\n\n{LANGUE_DIRECTIVE}\n"
+        "\n"
+        "## Métadonnées\n"
+        "\n"
+        f"- Date : {now.strftime('%Y-%m-%d')}\n"
+        f"- Heure : {now.strftime('%H:%M')}\n"
+        f"- Fuseau : {tz}\n"
+        f"- OS : {platform.system()} {platform.machine()}\n"
     )
     fd, path = tempfile.mkstemp(prefix="persoia-ctx-", suffix=".md", text=True)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -318,7 +381,7 @@ _FORBIDDEN_NAMES = frozenset({
 _MAX_DISCOVER_FILES = 20
 _MAX_FILE_SIZE_BYTES = 200_000  # 200 KB — anything larger usually a generated artifact
 
-GENERATION_PROMPT = """\
+GENERATION_PROMPT = f"""\
 Tu es un assistant technique. Génère un fichier PERSOIA.md concis (100-150 lignes max) pour un projet de développement logiciel.
 
 Ce fichier sera injecté comme contexte dans un assistant de codage IA avec une fenêtre de contexte limitée (8K tokens). Il doit être :
@@ -328,19 +391,26 @@ Ce fichier sera injecté comme contexte dans un assistant de codage IA avec une 
 
 Voici le scan automatique du projet :
 
-{scan_text}
+{{scan_text}}
 
 Génère le fichier PERSOIA.md avec ces sections :
 1. # NomDuProjet — une ligne de description
-2. ## Stack (tableau : composant | technologie | version si connue)
-3. ## Structure (arbre des répertoires principaux, commentés)
-4. ## Commandes (bloc code bash avec les commandes dev/build/test/lint)
-5. ## Conventions (style de code détecté, format de commits si .git)
-6. ## Architecture (notes brèves sur l'architecture si détectable)
+2. ## Langue — directive de réponse (texte obligatoire ci-dessous)
+3. ## Stack (tableau : composant | technologie | version si connue)
+4. ## Structure (arbre des répertoires principaux, commentés)
+5. ## Commandes (bloc code bash avec les commandes dev/build/test/lint)
+6. ## Conventions (style de code détecté, format de commits si .git)
+7. ## Architecture (notes brèves sur l'architecture si détectable)
+
+La section `## Langue` doit reprendre TEXTUELLEMENT ce contenu :
+
+```
+{LANGUE_DIRECTIVE}
+```
 
 Règles :
 - Ne pas inventer d'information absente du scan
-- Si une section manque de données, l'omettre plutôt que deviner
+- Si une section manque de données, l'omettre plutôt que deviner (sauf `## Langue` qui est obligatoire)
 - Garder le fichier sous 150 lignes
 - Langue : français pour les titres et descriptions
 - Retourne UNIQUEMENT le contenu markdown, sans bloc code englobant"""
@@ -1274,7 +1344,13 @@ def cmd_init() -> None:
             else:
                 print("Erreur. Le contenu précédent est conservé.")
 
-    # Save
+    # Save — _ensure_langue_section guarantees the directive across BOTH
+    # the LLM-generated path (which honors the prompt's "obligatoire" rule)
+    # AND the offline _make_raw_template fallback (which has no LLM to
+    # honor a prompt rule). Without this, an offline `persoia init` would
+    # produce a PERSOIA.md silently missing the directive — the exact
+    # regression CodeRabbit flagged.
+    content = _ensure_langue_section(content)
     persoia_md.write_text(content + "\n", encoding="utf-8")
     line_count = len(content.splitlines())
     print()
