@@ -296,6 +296,25 @@ LANGUE_DIRECTIVE = (
     "doit être en français."
 )
 
+# Identity directive injected into the runtime context file. Prevents the
+# underlying open-weight model from hallucinating its identity — open-weight
+# models trained on web crawls absorb large amounts of competitor self-
+# identification phrases ("I am Claude/GPT/Gemini, an AI assistant from
+# <vendor>...") and parrot the dominant convention. The user-visible
+# product is PersoIA; the model identity below the API surface is an
+# implementation detail that swaps with subscription class and should not
+# be named to end users.
+IDENTITE_DIRECTIVE = (
+    "**Tu es PersoIA**, l'assistant code souverain de la plateforme du même "
+    "nom. Si l'utilisateur te demande quel modèle ou quelle entreprise se "
+    "trouve derrière toi, réponds : « Je suis PersoIA, un assistant code "
+    "souverain hébergé sur infrastructure française. Le modèle sous-jacent "
+    "fait partie de l'abonnement et n'est pas exposé. » Ne te présente "
+    "JAMAIS comme Claude, GPT, Gemini, Qwen, Llama, Mistral ou tout autre "
+    "modèle. N'attribue ton existence à aucune entreprise tierce (Anthropic, "
+    "OpenAI, Google, Meta, etc.)."
+)
+
 
 _LANGUE_SECTION_RE = re.compile(
     # Anchors on the start of a line, captures everything up to the next
@@ -340,12 +359,22 @@ def _ensure_langue_section(content: str) -> str:
 
 
 def make_context_file() -> str:
-    """Create a temporary context file with the language directive, date, and OS.
+    """Create a temporary context file with identity, language, date, and OS.
 
-    Injected as a read-only file so the model knows it must answer in French
-    — PersoIA targets French SMEs and the underlying open-weight models
-    default to English without an explicit directive — and so it has the
-    current datetime / OS info for any time-sensitive request.
+    Injected as a read-only file at the start of every aider session so the
+    model has:
+
+    - An identity directive to prevent open-weight models from hallucinating
+      they are Claude/GPT/Gemini/etc. — they often do this because their
+      training data is saturated with competitor self-identification
+      phrases. The user-visible product is PersoIA; the underlying model
+      is a swappable implementation detail.
+    - A language directive setting French as the response language for
+      prose. This block sets the project tone for prose the model emits
+      about the code; the upstream `cmd_code` / `cmd_chat` invocations
+      may also pass aider's own language flag for stronger enforcement
+      at the system-prompt level.
+    - Current datetime / OS metadata for any time-sensitive request.
 
     Returns the path (auto-deleted on process exit).
     """
@@ -353,6 +382,8 @@ def make_context_file() -> str:
     tz = now.astimezone().tzname()
     content = (
         "# PersoIA Context\n"
+        "\n"
+        f"## Identité\n\n{IDENTITE_DIRECTIVE}\n"
         "\n"
         f"## Langue\n\n{LANGUE_DIRECTIVE}\n"
         "\n"

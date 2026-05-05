@@ -162,6 +162,26 @@ if "## Langue" not in body:
 if persoia.LANGUE_DIRECTIVE not in body:
     fail("make_context_file: directive mismatch with LANGUE_DIRECTIVE" + chr(10) + body)
 
+# Identity directive prevents the model from hallucinating its identity
+# — open-weight LLMs trained on web crawls absorb large amounts of
+# competitor self-identification phrases and tend to claim they are
+# Claude / GPT / Gemini / etc. by default. Both the heading and the
+# canonical text must land in the temp ctx file.
+if "## Identité" not in body:
+    fail("make_context_file: missing Identité section" + chr(10) + body)
+if persoia.IDENTITE_DIRECTIVE not in body:
+    fail("make_context_file: identity directive mismatch with IDENTITE_DIRECTIVE" + chr(10) + body)
+# The Identité heading must come BEFORE the Langue heading so identity
+# instructions get higher attention weight than language instructions
+# (failure mode: the model identifies as "Claude qui parle français").
+idx_id = body.find("## Identité")
+idx_lang = body.find("## Langue")
+if idx_id < 0 or idx_lang < 0 or idx_id > idx_lang:
+    fail(
+        "make_context_file: Identité section must precede Langue section "
+        f"(idx_id={idx_id}, idx_lang={idx_lang})" + chr(10) + body
+    )
+
 # Offline _make_raw_template path must also carry the directive once
 # wrapped through _ensure_langue_section (the cmd_init save site).
 raw = persoia._make_raw_template({
