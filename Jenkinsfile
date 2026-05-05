@@ -33,6 +33,86 @@ pipeline {
                         sh '''
                             set -eu
                             python3 -m py_compile src/persoia.py tests/mock_api.py
+
+                            # --- Source-level: the cmd_code helpers must reject
+                            # path traversal and forbidden names. Validating at
+                            # lint-time avoids needing an interactive aider in CI.
+                            python3 - <<'PY'
+import sys, tempfile, shutil
+sys.path.insert(0, "src")
+import persoia
+
+
+def fail(msg):
+    raise SystemExit("LINT FAIL: " + msg)
+
+
+# Argument classifier returns (aider_flags, file_paths, persoia_flags).
+# Persoia-owned flags must be detected at top level only — never as the
+# value of an aider flag like `--message -y`.
+flags, files, persoia_flags = persoia._classify_code_args(
+    ["foo.py", "--model", "x", "bar.go", "-y", "--no-discover"]
+)
+if files != ["foo.py", "bar.go"]:
+    fail(f"unexpected files: {files}")
+if "--model" not in flags or "x" not in flags:
+    fail(f"--model/value missing: {flags}")
+if not persoia_flags["auto_yes"] or not persoia_flags["no_discover"]:
+    fail(f"persoia flags not parsed: {persoia_flags}")
+
+# `--message -y`: -y is the message value, not a persoia auto-confirm.
+flags, files, persoia_flags = persoia._classify_code_args(["--message", "-y"])
+if persoia_flags["auto_yes"]:
+    fail("auto_yes incorrectly triggered when -y is a flag value")
+if flags != ["--message", "-y"]:
+    fail(f"-y not preserved as flag value: {flags}")
+
+# Path safety: cwd-bound (absolute paths under cwd OK), refuses traversal,
+# refuses leaf names AND segments in forbidden lists.
+tmp = tempfile.mkdtemp()
+try:
+    cwd = persoia.Path(tmp)
+    (cwd / "ok.txt").touch()
+    (cwd / ".aws").mkdir()
+    (cwd / ".aws" / "credentials").write_text("nope")
+    if persoia._resolve_safe_file("ok.txt", cwd) is None:
+        fail("relative ok.txt rejected")
+    # Absolute path under cwd: ALLOWED (clarification of finding #3 — the
+    # rule is cwd-bound, not "no absolute paths".)
+    if persoia._resolve_safe_file(str(cwd / "ok.txt"), cwd) is None:
+        fail("absolute path under cwd rejected")
+    if persoia._resolve_safe_file("../../etc/passwd", cwd) is not None:
+        fail("traversal accepted")
+    if persoia._resolve_safe_file("/etc/passwd", cwd) is not None:
+        fail("absolute path outside cwd accepted")
+    if persoia._resolve_safe_file(".env", cwd) is not None:
+        fail("forbidden leaf name .env accepted")
+    if persoia._resolve_safe_file(".aws/credentials", cwd) is not None:
+        fail("forbidden path segment .aws accepted")
+finally:
+    shutil.rmtree(tmp)
+
+# Project scan honors excluded dirs, dotfiles, size cap
+tmp = tempfile.mkdtemp()
+try:
+    cwd = persoia.Path(tmp)
+    (cwd / "real.py").write_text("x")
+    (cwd / "node_modules").mkdir()
+    (cwd / "node_modules" / "ignored.js").write_text("y")
+    (cwd / ".env").write_text("SECRET=x")
+    found = persoia._collect_project_files(cwd)
+    names = {p.name for p in found}
+    if "real.py" not in names:
+        fail("real.py not discovered")
+    if "ignored.js" in names:
+        fail("ignored.js leaked from node_modules")
+    if ".env" in names:
+        fail(".env leaked into discovery")
+finally:
+    shutil.rmtree(tmp)
+
+print("OK: cmd_code helpers reject unsafe paths and parse flags safely")
+PY
                         '''
                     }
                 }
