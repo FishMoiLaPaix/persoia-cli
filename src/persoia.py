@@ -263,18 +263,28 @@ _AIDER_HELP_TEXT: str = ""
 def aider_supports(flag: str) -> bool:
     """Check whether the installed aider exposes a given flag.
 
-    Used as a feature gate: PersoIA passes flags like `--chat-language` and
-    `--thinking-tokens` to aider, but older aider builds may reject one or
-    both. Probing once with `aider --help` and caching the full help text
-    lets us check any flag on demand and fall back gracefully (warn the
-    user, drop the flag, keep going) instead of failing `persoia` startup.
+    Used as a feature gate: PersoIA passes `--chat-language french` to aider,
+    but older builds may not accept that flag. Probing once with `aider
+    --help` and caching the full help text lets us check any flag on demand
+    and fall back gracefully (warn the user, drop the flag, keep going)
+    instead of failing `persoia` startup.
+
+    `--thinking-tokens` is intentionally NOT passed by PersoIA — see the
+    discussion in `cmd_code` for the dead-end matrix on Qwen 3.5 reasoning
+    suppression. The strip in `aider_flags` is to suppress a stderr warning
+    when a user passes the flag, not because PersoIA opts into the flag.
     """
     global _AIDER_HELP_CACHED, _AIDER_HELP_TEXT
     if not _AIDER_HELP_CACHED:
         _AIDER_HELP_CACHED = True
         try:
+            # Resolve the absolute path via `shutil.which` instead of a bare
+            # "aider" — `require_aider()` already validated the binary
+            # exists, so this avoids the Ruff S607 partial-path warning AND
+            # the (theoretical) race between which() and run().
+            aider_bin = shutil.which("aider") or "aider"
             result = subprocess.run(
-                ["aider", "--help"],
+                [aider_bin, "--help"],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -1753,10 +1763,19 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
     # model advertises `thinking_tokens` support via its API metadata.
     # openai/persoia (Qwen-via-openai-compat backend) doesn't, so passing
     # the flag produces a stderr warning ("does not support 'thinking_tokens',
-    # ignoring") AND leaves the model's reasoning fully active. The ctx
-    # file's `/no_think` token (see `make_context_file`) is the actual
-    # mechanism that suppresses Qwen3-family reasoning blocks. Still strip
-    # any user-provided value so they don't trigger the same warning.
+    # ignoring") and leaves reasoning fully active.
+    #
+    # All tested client-side suppression approaches (`/no_think` token in
+    # the ctx file, `/no_think` prepended/appended to the user message, a
+    # natural-language envelope, the `--thinking-tokens 0` flag itself)
+    # were verified ineffective on this backend 2026-05-05. Real reasoning
+    # suppression requires a backend change — the OpenAI-compat proxy must
+    # forward `extra_body.chat_template_kwargs.enable_thinking=False` to
+    # the inference layer (vLLM accepts this natively for Qwen3-family).
+    # Tracked in api.persoia.com#384.
+    #
+    # We still strip any user-provided `--thinking-tokens` so that they
+    # don't trigger the same stderr warning on every invocation.
     aider_flags = _strip_flag_with_value(aider_flags, "--thinking-tokens")
 
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
@@ -1833,9 +1852,11 @@ def cmd_chat(config: dict, message: str) -> None:
             file=sys.stderr,
         )
 
-    # No `--thinking-tokens 0` — see cmd_code: the flag is a no-op for
-    # Qwen-via-openai-compat and produces a stderr warning. Reasoning is
-    # suppressed via the `/no_think` token in the ctx file instead.
+    # No `--thinking-tokens 0` and no `/no_think` injection — see the
+    # detailed discussion in `cmd_code`. All tested client-side reasoning
+    # suppression approaches were verified ineffective on this backend
+    # 2026-05-05. Real fix requires backend support for
+    # `extra_body.chat_template_kwargs.enable_thinking=False` (api#384).
 
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
     for md_file in collect_persoia_md_files():
