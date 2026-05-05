@@ -261,12 +261,13 @@ LANGUE_DIRECTIVE = (
 )
 
 # Identity directive injected into the runtime context file. Prevents the
-# underlying open-weight model (Qwen 3.5 27B Q4 on demo, others on tenant
-# instances) from hallucinating its identity — observed live: Qwen claimed
-# to be "an AI assistant developed by Anthropic, based on Claude" because
-# its training data includes copious Claude references. The user-visible
+# underlying open-weight model from hallucinating its identity — open-weight
+# models trained on web crawls absorb large amounts of competitor self-
+# identification phrases ("I am Claude/GPT/Gemini, an AI assistant from
+# <vendor>...") and parrot the dominant convention. The user-visible
 # product is PersoIA; the model identity below the API surface is an
-# implementation detail that should not be named to end users.
+# implementation detail that swaps with subscription class and should not
+# be named to end users.
 IDENTITE_DIRECTIVE = (
     "**Tu es PersoIA**, l'assistant code souverain de la plateforme du même "
     "nom. Si l'utilisateur te demande quel modèle ou quelle entreprise se "
@@ -328,13 +329,15 @@ def make_context_file() -> str:
     model has:
 
     - An identity directive to prevent open-weight models from hallucinating
-      they are Claude/GPT/Gemini/etc. (Qwen does this because its training
-      data is full of Claude transcripts). The user-visible product is
-      PersoIA; the underlying model is an implementation detail.
-    - A language directive setting French as the response language for prose
-      (a redundant safety net — `--chat-language french` passed to aider is
-      the primary enforcement; this block sets the project tone for prose
-      the model emits about the code).
+      they are Claude/GPT/Gemini/etc. — they often do this because their
+      training data is saturated with competitor self-identification
+      phrases. The user-visible product is PersoIA; the underlying model
+      is a swappable implementation detail.
+    - A language directive setting French as the response language for
+      prose. This block sets the project tone for prose the model emits
+      about the code; the upstream `cmd_code` / `cmd_chat` invocations
+      may also pass aider's own language flag for stronger enforcement
+      at the system-prompt level.
     - Current datetime / OS metadata for any time-sensitive request.
 
     Returns the path (auto-deleted on process exit).

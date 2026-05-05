@@ -140,9 +140,10 @@ if persoia.LANGUE_DIRECTIVE not in body:
     fail("make_context_file: directive mismatch with LANGUE_DIRECTIVE" + chr(10) + body)
 
 # Identity directive prevents the model from hallucinating its identity
-# (Qwen 3.5 27B Q4 claims to be Claude because its training data is full
-# of Claude transcripts). Both the heading and the canonical text must
-# land in the temp ctx file.
+# — open-weight LLMs trained on web crawls absorb large amounts of
+# competitor self-identification phrases and tend to claim they are
+# Claude / GPT / Gemini / etc. by default. Both the heading and the
+# canonical text must land in the temp ctx file.
 if "## Identité" not in body:
     fail("make_context_file: missing Identité section" + chr(10) + body)
 if persoia.IDENTITE_DIRECTIVE not in body:
