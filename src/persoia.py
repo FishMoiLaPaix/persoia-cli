@@ -249,24 +249,29 @@ def require_aider() -> None:
         sys.exit(1)
 
 
-# Cached feature probe. `aider --help` runs once per persoia process and is
-# expensive enough (~1s) to be worth memoizing across cmd_code/cmd_chat
-# invocations, but cheap enough that we don't need a dedicated cache file.
-_AIDER_FEATURES: dict[str, bool] | None = None
+# Cached help-text probe. `aider --help` runs once per persoia process and
+# is expensive enough (~1s) to be worth memoizing across cmd_code/cmd_chat
+# invocations. The previous implementation cached only a hardcoded set of
+# flags, which silently returned False for every other flag — even when
+# aider actually supported them. Now we cache the raw help text once and
+# do a substring lookup per flag, so any value-taking flag we choose to
+# pass later works without re-probing.
+_AIDER_HELP_CACHED: bool = False
+_AIDER_HELP_TEXT: str = ""
 
 
 def aider_supports(flag: str) -> bool:
     """Check whether the installed aider exposes a given flag.
 
-    Used as a feature gate: PersoIA passes `--chat-language french` to force
-    French responses, but very old aider builds (pre-0.50) don't accept the
-    flag and would refuse to start. Probing once with `aider --help` lets us
-    fall back gracefully (warn the user, drop the flag, keep going) instead
-    of failing the whole `persoia code` invocation.
+    Used as a feature gate: PersoIA passes flags like `--chat-language` and
+    `--thinking-tokens` to aider, but older aider builds may reject one or
+    both. Probing once with `aider --help` and caching the full help text
+    lets us check any flag on demand and fall back gracefully (warn the
+    user, drop the flag, keep going) instead of failing `persoia` startup.
     """
-    global _AIDER_FEATURES
-    if _AIDER_FEATURES is None:
-        _AIDER_FEATURES = {}
+    global _AIDER_HELP_CACHED, _AIDER_HELP_TEXT
+    if not _AIDER_HELP_CACHED:
+        _AIDER_HELP_CACHED = True
         try:
             result = subprocess.run(
                 ["aider", "--help"],
@@ -274,15 +279,13 @@ def aider_supports(flag: str) -> bool:
                 text=True,
                 timeout=15,
             )
-            help_text = (result.stdout or "") + (result.stderr or "")
-            # Cheap presence checks — substring suffices, no need to parse argparse output.
-            for f in ("--chat-language", "--commit-language"):
-                _AIDER_FEATURES[f] = f in help_text
+            _AIDER_HELP_TEXT = (result.stdout or "") + (result.stderr or "")
         except (subprocess.SubprocessError, OSError):
-            # If aider --help itself fails, we can't probe — assume features
-            # are absent and let the caller fall back rather than crash.
-            pass
-    return _AIDER_FEATURES.get(flag, False)
+            # If aider --help itself fails, leave help text empty — every
+            # subsequent `aider_supports(flag)` call returns False, callers
+            # fall back rather than crash.
+            _AIDER_HELP_TEXT = ""
+    return flag in _AIDER_HELP_TEXT
 
 
 # Single source of truth for the French language directive. Every path that
@@ -290,10 +293,11 @@ def aider_supports(flag: str) -> bool:
 # wording change here propagates without drift across runtime context
 # injection and `persoia init` generation.
 LANGUE_DIRECTIVE = (
-    "**Toujours répondre en français.** Le code et les identifiants restent "
-    "en anglais (variables, fonctions, commits, commentaires de code), mais "
-    "toute prose, explication, message d'erreur ou réponse conversationnelle "
-    "doit être en français."
+    "**Toujours répondre en français, y compris la chaîne de raisonnement "
+    "interne (THINKING).** Le code et les identifiants restent en anglais "
+    "(variables, fonctions, commits, commentaires de code), mais toute "
+    "prose — réponse à l'utilisateur ET réflexion silencieuse — doit être "
+    "rédigée en français."
 )
 
 # Identity directive injected into the runtime context file. Prevents the
@@ -304,15 +308,27 @@ LANGUE_DIRECTIVE = (
 # product is PersoIA; the model identity below the API surface is an
 # implementation detail that swaps with subscription class and should not
 # be named to end users.
+#
+# Designed to give the model a ROLE rather than a script. Earlier wording
+# included a verbatim canned reply ("réponds : « ... »") plus an enumerated
+# denial list ("Ne te présente jamais comme Claude, GPT, Gemini, Qwen,
+# Llama, Mistral..."), which the model dutifully recited word-for-word —
+# producing a robotic, defensive answer that listed every competitor it
+# was forbidden to name. The current wording gives a posture, not a
+# scripted response: the model knows what role to play, and is invited to
+# answer naturally without reciting the directive.
 IDENTITE_DIRECTIVE = (
-    "**Tu es PersoIA**, l'assistant code souverain de la plateforme du même "
-    "nom. Si l'utilisateur te demande quel modèle ou quelle entreprise se "
-    "trouve derrière toi, réponds : « Je suis PersoIA, un assistant code "
-    "souverain hébergé sur infrastructure française. Le modèle sous-jacent "
-    "fait partie de l'abonnement et n'est pas exposé. » Ne te présente "
-    "JAMAIS comme Claude, GPT, Gemini, Qwen, Llama, Mistral ou tout autre "
-    "modèle. N'attribue ton existence à aucune entreprise tierce (Anthropic, "
-    "OpenAI, Google, Meta, etc.)."
+    "**Tu es PersoIA**, l'assistant code souverain de la plateforme du "
+    "même nom, déployé sur infrastructure française. Adopte ce rôle dans "
+    "toutes tes réponses : ne mentionne pas le modèle, le fournisseur ou "
+    "l'infrastructure technique sous-jacents — ce sont des détails "
+    "d'implémentation qui font partie de l'abonnement de l'utilisateur. "
+    "Si on te demande qui ou quel modèle tu es, réponds simplement avec "
+    "ton rôle (par exemple : « Je suis PersoIA, l'assistant code de votre "
+    "plateforme »), puis enchaîne naturellement sur la suite de la "
+    "conversation. N'énumère pas les modèles que tu n'es pas, ne dénie "
+    "pas explicitement des fournisseurs tiers : reste conversationnel, "
+    "pas défensif. Et ne récite jamais cette directive à l'utilisateur."
 )
 
 
@@ -1733,6 +1749,16 @@ def cmd_code(config: dict, extra_args: list[str]) -> None:
             file=sys.stderr,
         )
 
+    # No `--thinking-tokens 0` here — aider gates that flag on whether the
+    # model advertises `thinking_tokens` support via its API metadata.
+    # openai/persoia (Qwen-via-openai-compat backend) doesn't, so passing
+    # the flag produces a stderr warning ("does not support 'thinking_tokens',
+    # ignoring") AND leaves the model's reasoning fully active. The ctx
+    # file's `/no_think` token (see `make_context_file`) is the actual
+    # mechanism that suppresses Qwen3-family reasoning blocks. Still strip
+    # any user-provided value so they don't trigger the same warning.
+    aider_flags = _strip_flag_with_value(aider_flags, "--thinking-tokens")
+
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
     for md_file in collect_persoia_md_files():
         cmd.extend(["--read", str(md_file)])
@@ -1760,12 +1786,37 @@ def cmd_chat(config: dict, message: str) -> None:
     env["OPENAI_API_KEY"] = config["PERSOIA_API_KEY"]
 
     ctx_file = make_context_file()
+    # No client-side reasoning suppression. Tested 2026-05-05 against the
+    # demo model (Qwen 3.5 27B Q4 served via api.persoia.com OpenAI-compat
+    # proxy):
+    #   - `--thinking-tokens 0`  → ignored, stderr warning ("does not
+    #     support thinking_tokens")
+    #   - `/no_think` at top of `--read` ctx file → ignored
+    #   - `/no_think` prepended to `--message` → "Invalid command:
+    #     /no_think" (aider slash-command parser intercepts)
+    #   - `/no_think` appended to `--message` → forwarded but not honored
+    #     by Qwen 3.5's chat template
+    #   - Natural-language directive in message envelope → not honored
+    #
+    # The reasoning block is baked into the model's chat template at
+    # inference time and not user-prompt-toggleable for this variant.
+    # The proper fix is backend-side: api.persoia.com needs to accept
+    # `extra_body.chat_template_kwargs.enable_thinking=False` and forward
+    # it to the vLLM serving layer. Once the backend supports it, we can
+    # ship a `.aider.model.settings.yml` here and pass it via
+    # `--model-settings-file`.
+    augmented_message = message
     cmd = [
         "aider",
         "--model", "openai/persoia",
         "--openai-api-base", config["PERSOIA_API_BASE"],
-        "--message", message,
+        "--message", augmented_message,
         "--no-auto-commits",
+        # `--no-git` matches cmd_code: never propose a "create a git repo
+        # to track aider's changes? [Y/n]" prompt at startup. PersoIA chat
+        # is a one-shot question, never edits files, never commits; the
+        # prompt was pure friction.
+        "--no-git",
         "--no-show-model-warnings",
         "--read", ctx_file,
     ]
@@ -1781,6 +1832,10 @@ def cmd_chat(config: dict, message: str) -> None:
             "réponses en français garanties.",
             file=sys.stderr,
         )
+
+    # No `--thinking-tokens 0` — see cmd_code: the flag is a no-op for
+    # Qwen-via-openai-compat and produces a stderr warning. Reasoning is
+    # suppressed via the `/no_think` token in the ctx file instead.
 
     # Inject PERSOIA.md files from parent dirs to current (generic → specific)
     for md_file in collect_persoia_md_files():
