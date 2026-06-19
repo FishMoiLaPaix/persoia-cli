@@ -293,6 +293,28 @@ def test_options_returns_cors_preflight(monkeypatch) -> None:
     assert result is not None and result["token"] == "persoia_sk_good"
 
 
+def test_options_grants_private_network_access(monkeypatch) -> None:
+    # Chrome/Edge Private Network Access: an https origin posting to a loopback
+    # address sends a preflight with `Access-Control-Request-Private-Network`,
+    # and the response MUST echo `Access-Control-Allow-Private-Network: true`
+    # or the browser blocks the token POST ("Impossible de joindre le terminal").
+    captured: dict = {}
+
+    def opener(authorize_url: str) -> None:
+        callback, state = _parse_authorize_url(authorize_url)
+        req = urllib.request.Request(callback, method="OPTIONS")
+        req.add_header("Access-Control-Request-Private-Network", "true")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            captured["allow_pna"] = resp.headers.get(
+                "Access-Control-Allow-Private-Network"
+            )
+        _post_callback(callback, {"token": "persoia_sk_good", "state": state})
+
+    result = _run_browser_login(monkeypatch, opener)
+    assert captured.get("allow_pna") == "true"
+    assert result is not None and result["token"] == "persoia_sk_good"
+
+
 # --------------------------------------------------------------------------- #
 # The CLI advertises the loopback callback on the literal IPv4 127.0.0.1
 # (not "localhost", which may resolve to ::1 and break the browser fetch).

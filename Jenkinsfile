@@ -323,67 +323,93 @@ PY
                 }
 
                 stage('macOS arm64') {
-                    // `agent none` at stage level + `node('mac-arm64')` INSIDE
-                    // the timeout is the only way for a missing-agent wait to
-                    // count toward the timeout (otherwise the timeout step
-                    // only ticks on exec time, not on queue wait).
+                    // Two-phase, pure-pipeline (no plugin, no script-security
+                    // exception): only `timeout`/`node`/`try-catch`/echo are used.
                     //
-                    // `catchError` alone does NOT downgrade a timeout-induced
-                    // ABORTED back to UNSTABLE — Jenkins sets the build result
-                    // before catchError runs. Use an explicit script-level
-                    // try/catch + `currentBuild.result = 'UNSTABLE'` to
-                    // override.
+                    // Phase 1 — a SHORT timeout that ONLY probes node acquisition
+                    // (does nothing heavy). If no mac agent is reachable, the
+                    // node step queues and the 90s timeout interrupts it; we catch
+                    // generically (no exception-class reference) and skip fast —
+                    // a totally-absent agent costs ~90s instead of the full build
+                    // timeout.
+                    //
+                    // Phase 2 — the real build, with its OWN generous timeout
+                    // (venv + pip + PyInstaller + smoke tests). Splitting the two
+                    // is what lets us fail fast on a missing agent WITHOUT risking
+                    // a slow-but-present build being killed.
                     agent none
                     steps {
                         script {
+                            def macReachable = true
                             try {
-                                timeout(time: 5, unit: 'MINUTES') {
+                                timeout(time: 90, unit: 'SECONDS') {
                                     node('mac-arm64') {
-                                        checkout scm
-                                        sh '''
-                                            set -eu
-                                            python3 -m venv .venv
-                                            . .venv/bin/activate
-                                            pip install --upgrade pip
-                                            pip install -r requirements-build.txt
-                                            pyinstaller --clean --noconfirm persoia.spec
-                                            mv dist/persoia dist/persoia-darwin-arm64
-                                            BIN="$PWD/dist/persoia-darwin-arm64"
-
-                                            "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
-                                            "$BIN" help    | grep -q "Assistant code souverain"
-                                            : > /tmp/empty.env
-                                            PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
-
-                                            # --- Installateur .pkg (outils natifs macOS) ---
-                                            VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
-                                            bash packaging/macos/build-pkg.sh "$PWD/dist/persoia-darwin-arm64" "$VER"
-                                            test -f "dist/persoia-${VER}-arm64.pkg"
-                                        '''
-                                        archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
-                                        archiveArtifacts artifacts: 'dist/*-arm64.pkg', fingerprint: true
-                                        stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
-                                        stash name: 'installer-macos', includes: 'dist/*-arm64.pkg'
+                                        echo 'mac-arm64 agent reachable'
                                     }
                                 }
                             } catch (err) {
-                                // For PR builds (env.CHANGE_ID set), reset the
-                                // result to SUCCESS so the PR check passes —
-                                // we don't want a missing mac agent to block
-                                // merges. The Release stage on tag/main builds
-                                // will hard-fail when it tries to unstash the
-                                // missing mac binary, so we never accidentally
-                                // ship an incomplete release.
-                                //
-                                // currentBuild.result = 'UNSTABLE' would have
-                                // worked semantically, but the Jenkins GitHub
-                                // Checks plugin maps UNSTABLE → conclusion
-                                // 'failure' which blocks the merge anyway.
-                                echo "mac-arm64 stage failed: ${err}"
+                                // Any failure to acquire the node within 90s
+                                // (no agent online) → treat as unreachable.
+                                echo "mac-arm64 agent unreachable within 90s: ${err}"
+                                macReachable = false
+                            }
+
+                            if (!macReachable) {
+                                // No agent → skip fast.
+                                //  - PR builds: force SUCCESS to OVERRIDE the
+                                //    ABORTED that the Phase-1 timeout sets, so a
+                                //    missing agent never blocks merges (the GitHub
+                                //    Checks plugin maps ABORTED/UNSTABLE → failure).
+                                //  - tag/main: UNSTABLE so the Release stage
+                                //    publishes a PARTIAL release.
+                                echo 'Stage macOS ignoré (agent indisponible) — release partielle.'
                                 if (env.CHANGE_ID) {
                                     currentBuild.result = 'SUCCESS'
                                 } else {
-                                    throw err
+                                    currentBuild.result = 'UNSTABLE'
+                                }
+                            } else {
+                                try {
+                                    timeout(time: 15, unit: 'MINUTES') {
+                                        node('mac-arm64') {
+                                            checkout scm
+                                            sh '''
+                                                set -eu
+                                                python3 -m venv .venv
+                                                . .venv/bin/activate
+                                                pip install --upgrade pip
+                                                pip install -r requirements-build.txt
+                                                pyinstaller --clean --noconfirm persoia.spec
+                                                mv dist/persoia dist/persoia-darwin-arm64
+                                                BIN="$PWD/dist/persoia-darwin-arm64"
+
+                                                "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                                                "$BIN" help    | grep -q "Assistant code souverain"
+                                                : > /tmp/empty.env
+                                                PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+
+                                                # --- Installateur .pkg (outils natifs macOS) ---
+                                                VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
+                                                bash packaging/macos/build-pkg.sh "$PWD/dist/persoia-darwin-arm64" "$VER"
+                                                test -f "dist/persoia-${VER}-arm64.pkg"
+                                            '''
+                                            archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                            archiveArtifacts artifacts: 'dist/*-arm64.pkg', fingerprint: true
+                                            stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                            stash name: 'installer-macos', includes: 'dist/*-arm64.pkg'
+                                        }
+                                    }
+                                } catch (err) {
+                                    // The agent was reachable, so this is a REAL
+                                    // build/test failure (PyInstaller, smoke test)
+                                    // or a rare mid-build agent drop. Do NOT ship a
+                                    // partial release hiding a broken mac binary:
+                                    // tolerate only on PR builds, hard-fail on
+                                    // tag/main.
+                                    echo "mac-arm64 build failed: ${err}"
+                                    if (!env.CHANGE_ID) {
+                                        throw err
+                                    }
                                 }
                             }
                         }
@@ -456,12 +482,48 @@ PY
             agent { label 'python311' }
             steps {
                 checkout scm
-                unstash 'binary-linux-x64'
-                unstash 'binary-darwin-arm64'
-                unstash 'binary-windows-x64'
-                unstash 'installer-linux'
-                unstash 'installer-macos'
-                unstash 'installer-windows'
+                script {
+                    // Tolerate a missing per-platform binary (e.g. the macOS
+                    // agent offline) so a PARTIAL release can still publish the
+                    // platforms that built. unstash throws when a stash is
+                    // absent — collect the ones that succeed and pass the set
+                    // to the upload step via env flags. L'installateur de chaque
+                    // plateforme est unstashé avec son binaire (même provenance).
+                    def stashes = [
+                        'linux'  : ['binary-linux-x64',    'installer-linux'],
+                        'darwin' : ['binary-darwin-arm64', 'installer-macos'],
+                        'windows': ['binary-windows-x64',  'installer-windows'],
+                    ]
+                    def present = []
+                    stashes.each { platform, names ->
+                        try {
+                            unstash names[0]
+                            unstash names[1]
+                            present.add(platform)
+                        } catch (err) {
+                            // Tolerate ONLY a genuinely absent stash (the
+                            // platform stage was skipped, e.g. agent offline).
+                            // Any other error (stash corruption, Jenkins FS
+                            // problem) must NOT be silently turned into a
+                            // partial release — rethrow it.
+                            if (err.getMessage()?.contains('No such saved stash')) {
+                                echo "⚠️  ${platform} indisponible (stage non exécuté ?) — exclu de la release partielle"
+                            } else {
+                                throw err
+                            }
+                        }
+                    }
+                    if (present.isEmpty()) {
+                        error('Aucun binaire disponible — release annulée')
+                    }
+                    if (present.size() < stashes.size()) {
+                        echo "⚠️  Release PARTIELLE : plateformes publiées = ${present.join(', ')} (manquantes = ${(stashes.keySet() as List) - present})"
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                    env.RELEASE_HAS_LINUX   = present.contains('linux')   ? 'true' : 'false'
+                    env.RELEASE_HAS_DARWIN  = present.contains('darwin')  ? 'true' : 'false'
+                    env.RELEASE_HAS_WINDOWS = present.contains('windows') ? 'true' : 'false'
+                }
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
@@ -490,47 +552,66 @@ PY
                         #    symlinks, so both copies are uploaded (identical
                         #    content → identical SHA-256).
                         VER="${RELEASE_TAG#v}"
+                        # Only publish the platforms that built (partial release
+                        # tolerated — e.g. macOS agent offline). Each present
+                        # binary is uploaded under two names: versionless (the
+                        # stable "latest" alias used by `persoia update` and the
+                        # README curl) and versioned (persoia-<ver>-<platform>).
+                        # Only publish the platforms that built (partial release
+                        # tolerated). Chaque plateforme présente ajoute son binaire
+                        # ET son/ses installateur(s), chacun sous deux noms :
+                        # versionné + alias sans version (lien "latest" du README).
                         ( cd dist
-                          cp persoia-linux-x64       "persoia-${VER}-linux-x64"
-                          cp persoia-darwin-arm64    "persoia-${VER}-darwin-arm64"
-                          cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
-                          # Installateurs : alias sans version (liens "latest"
-                          # stables pour le README) à côté des noms versionnés.
-                          cp "persoia-${VER}-x64.msi"      persoia-x64.msi
-                          cp "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg
-                          cp "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb
-                          cp "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm
-                          # SHA256SUMS covers both names; `persoia update` looks
-                          # up the versionless entry, humans verify the versioned.
-                          # render-formula.sh y lit les empreintes darwin/linux.
-                          sha256sum \
-                            persoia-linux-x64 persoia-darwin-arm64 persoia-windows-x64.exe \
-                            "persoia-${VER}-linux-x64" "persoia-${VER}-darwin-arm64" "persoia-${VER}-windows-x64.exe" \
-                            "persoia-${VER}-x64.msi"      persoia-x64.msi \
-                            "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg \
-                            "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb \
-                            "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm \
-                            > SHA256SUMS )
-
-                        gh release upload "${RELEASE_TAG}" \
+                          UPLOADS=""
+                          if [ "${RELEASE_HAS_LINUX}" = "true" ]; then
+                            cp persoia-linux-x64 "persoia-${VER}-linux-x64"
+                            cp "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb
+                            cp "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm
+                            UPLOADS="$UPLOADS persoia-linux-x64 persoia-${VER}-linux-x64"
+                            UPLOADS="$UPLOADS persoia_${VER}-1_amd64.deb persoia-amd64.deb"
+                            UPLOADS="$UPLOADS persoia-${VER}-1.x86_64.rpm persoia-x86_64.rpm"
+                          fi
+                          if [ "${RELEASE_HAS_DARWIN}" = "true" ]; then
+                            cp persoia-darwin-arm64 "persoia-${VER}-darwin-arm64"
+                            cp "persoia-${VER}-arm64.pkg" persoia-arm64.pkg
+                            UPLOADS="$UPLOADS persoia-darwin-arm64 persoia-${VER}-darwin-arm64"
+                            UPLOADS="$UPLOADS persoia-${VER}-arm64.pkg persoia-arm64.pkg"
+                          fi
+                          if [ "${RELEASE_HAS_WINDOWS}" = "true" ]; then
+                            cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
+                            cp "persoia-${VER}-x64.msi" persoia-x64.msi
+                            UPLOADS="$UPLOADS persoia-windows-x64.exe persoia-${VER}-windows-x64.exe"
+                            UPLOADS="$UPLOADS persoia-${VER}-x64.msi persoia-x64.msi"
+                          fi
+                          # Per-asset <name>.sha256 sidecars: `persoia update`
+                          # reads these FIRST (then falls back to SHA256SUMS).
+                          # They make partial RE-RUNS safe — each rerun only
+                          # clobbers the sidecars of the platforms it republishes,
+                          # so a rerun missing a platform can never drop an
+                          # already-published checksum (which a regenerated, now
+                          # incomplete, SHA256SUMS would).
+                          SIDECARS=""
+                          for f in $UPLOADS; do
+                            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+                            SIDECARS="$SIDECARS $f.sha256"
+                          done
+                          # SHA256SUMS stays as a convenience manifest for humans;
+                          # it reflects only the platforms published in THIS run.
+                          sha256sum $UPLOADS > SHA256SUMS
+                          gh release upload "${RELEASE_TAG}" \
                             --repo FishMoiLaPaix/persoia-cli \
                             --clobber \
-                            dist/persoia-linux-x64 \
-                            dist/persoia-darwin-arm64 \
-                            dist/persoia-windows-x64.exe \
-                            "dist/persoia-${VER}-linux-x64" \
-                            "dist/persoia-${VER}-darwin-arm64" \
-                            "dist/persoia-${VER}-windows-x64.exe" \
-                            "dist/persoia-${VER}-x64.msi"      dist/persoia-x64.msi \
-                            "dist/persoia-${VER}-arm64.pkg"    dist/persoia-arm64.pkg \
-                            "dist/persoia_${VER}-1_amd64.deb"  dist/persoia-amd64.deb \
-                            "dist/persoia-${VER}-1.x86_64.rpm" dist/persoia-x86_64.rpm \
-                            dist/SHA256SUMS
+                            $UPLOADS $SIDECARS SHA256SUMS )
 
-                        # Met à jour la formula Homebrew dans le tap (skip propre
-                        # si le tap n'existe pas encore). gh est déjà sur le PATH
-                        # et GH_TOKEN est exporté par withCredentials.
-                        VERSION="$VER" bash packaging/homebrew/render-formula.sh dist/SHA256SUMS
+                        # Formula Homebrew : nécessite les empreintes darwin ET
+                        # linux (toutes deux dans SHA256SUMS). Skip propre si l'une
+                        # manque (release partielle) ou si le tap n'existe pas
+                        # encore. gh est sur le PATH, GH_TOKEN exporté.
+                        if [ "${RELEASE_HAS_DARWIN}" = "true" ] && [ "${RELEASE_HAS_LINUX}" = "true" ]; then
+                            VERSION="$VER" bash packaging/homebrew/render-formula.sh dist/SHA256SUMS
+                        else
+                            echo "Formula Homebrew non mise à jour (release partielle : darwin + linux requis)."
+                        fi
                     '''
                 }
             }

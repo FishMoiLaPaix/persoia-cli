@@ -38,7 +38,7 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 
-__version__ = "0.6.0"
+__version__ = "0.6.2"
 
 
 def collect_persoia_md_files() -> list[Path]:
@@ -1232,6 +1232,16 @@ def _browser_login(config: dict, timeout: int = 180) -> dict | None:
         def do_OPTIONS(self) -> None:  # noqa: N802 — http.server interface
             self.send_response(204)
             self._cors()
+            # Chrome/Edge "Private Network Access": a request from a secure
+            # public origin (the portal, e.g. https://chat.persoia.com or the
+            # demo portal) to a private/loopback address (127.0.0.1) is gated
+            # behind a preflight carrying
+            # `Access-Control-Request-Private-Network: true`. Without an
+            # explicit `Access-Control-Allow-Private-Network: true` in the
+            # response, the browser blocks the POST and the portal reports
+            # "Impossible de joindre le terminal". Echo it when requested.
+            if self.headers.get("Access-Control-Request-Private-Network") == "true":
+                self.send_header("Access-Control-Allow-Private-Network", "true")
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802 — http.server interface
@@ -2383,12 +2393,37 @@ def cmd_update(args: list[str]) -> None:
         sys.exit(1)
 
     print(f"Mise à jour réussie : {__version__} → {latest}")
-    print("Relancez 'persoia version' pour vérifier.")
+    # Double-quote the path so the hint is copy/pasteable in both POSIX shells
+    # and Windows cmd.exe, including paths with spaces (e.g. C:\Program Files\).
+    print(f'Relancez "{target}" version pour vérifier.')
+
+    # Warn when the binary just updated is NOT the `persoia` resolved on PATH:
+    # the user updated one copy (e.g. a versioned download) while their
+    # everyday `persoia` command still points at a different, older file.
+    on_path = shutil.which("persoia")
+    if on_path:
+        try:
+            same = Path(on_path).resolve() == target
+        except OSError:
+            same = False
+        if not same:
+            print(
+                f"Attention : la commande 'persoia' de votre PATH pointe vers "
+                f"{on_path}, un binaire différent qui n'a PAS été mis à jour.",
+                file=sys.stderr,
+            )
 
 
 def cmd_version() -> None:
-    """Display version information."""
+    """Display version information.
+
+    For the packaged binary, also print the path of the running executable so
+    that users with several copies (e.g. a versioned download alongside the
+    `persoia` on their PATH) can tell exactly which file they are invoking.
+    """
     print(f"persoia {__version__}")
+    if getattr(sys, "frozen", False):
+        print(f"  exécutable : {Path(sys.executable).resolve()}")
 
 
 def cmd_help() -> None:
