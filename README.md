@@ -59,7 +59,14 @@ echo "PERSOIA_API_KEY=persoia_sk_xxxxx" > ~/.config/persoia/config.env
 chmod 600 ~/.config/persoia/config.env
 ```
 
-Ou interactivement : `persoia login`
+Ou via `persoia login` : ouvre `chat.persoia.com` dans le navigateur, vous vous
+connectez sur le site (qui vérifie vos droits et votre tenant), et le token CLI
+dédié est récupéré automatiquement puis écrit dans la config. La récupération
+passe par un rappel local que le CLI écoute sur `http://127.0.0.1:<port>` —
+l'adresse IPv4 explicite est utilisée volontairement (et non `localhost`, qui
+peut résoudre vers la boucle IPv6 `::1` et empêcher le navigateur de joindre le
+serveur local). En environnement sans navigateur (headless/SSH), utilisez
+`persoia login --no-browser` (email / mot de passe).
 
 Le préfixe de la clé route automatiquement :
 - `persoia_demo_sk_*` → `https://demo.chat.persoia.com/v1`
@@ -69,7 +76,8 @@ Le préfixe de la clé route automatiquement :
 
 ```bash
 persoia version              # Afficher la version
-persoia login                # Authentification interactive
+persoia login                # Connexion via le navigateur (token CLI auto)
+persoia login --no-browser   # Connexion email / mot de passe (headless/SSH)
 persoia config               # Afficher la configuration courante
 persoia init                 # Créer un PERSOIA.md dans le projet
 persoia chat "question"      # Chat one-shot
