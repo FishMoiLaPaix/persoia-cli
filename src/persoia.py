@@ -2383,12 +2383,36 @@ def cmd_update(args: list[str]) -> None:
         sys.exit(1)
 
     print(f"Mise à jour réussie : {__version__} → {latest}")
-    print("Relancez 'persoia version' pour vérifier.")
+    print(f"Relancez '{target} version' pour vérifier.")
+
+    # Warn when the binary just updated is NOT the `persoia` resolved on PATH:
+    # the user updated one copy (e.g. a versioned download) while their
+    # everyday `persoia` command still points at a different, older file.
+    on_path = shutil.which("persoia")
+    if on_path:
+        try:
+            same = Path(on_path).resolve() == target
+        except OSError:
+            same = False
+        if not same:
+            print(
+                f"Attention : la commande 'persoia' de votre PATH pointe vers "
+                f"{on_path}, un binaire différent qui n'a PAS été mis à jour.",
+                file=sys.stderr,
+            )
 
 
 def cmd_version() -> None:
-    """Display version information."""
-    print(f"persoia {__version__}")
+    """Display version information.
+
+    For the packaged binary, also print the path of the running executable so
+    that users with several copies (e.g. a versioned download alongside the
+    `persoia` on their PATH) can tell exactly which file they are invoking.
+    """
+    if getattr(sys, "frozen", False):
+        print(f"persoia {__version__} ({Path(sys.executable).resolve()})")
+    else:
+        print(f"persoia {__version__}")
 
 
 def cmd_help() -> None:
