@@ -63,7 +63,7 @@ Ou interactivement : `persoia login`
 
 Le préfixe de la clé route automatiquement :
 - `persoia_demo_sk_*` → `https://demo.chat.persoia.com/v1`
-- `persoia_sk_*` → `https://api.persoia.com/v1`
+- `persoia_sk_*` → `https://chat.persoia.com/v1`
 
 ## Usage
 

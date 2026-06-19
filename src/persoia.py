@@ -87,7 +87,10 @@ def resolve_api_base(api_key: str, explicit_base: str) -> str:
         return explicit_base.strip()
     if api_key.strip().startswith("persoia_demo_sk_"):
         return "https://demo.chat.persoia.com/v1"
-    return "https://api.persoia.com/v1"
+    # Production API is served from the chat host (chat.persoia.com/api/v1 +
+    # /v1 OpenAI proxy), same as the demo pattern. api.persoia.com is not
+    # provisioned (503 + self-signed TLS cert), so it must not be the default.
+    return "https://chat.persoia.com/v1"
 
 
 def load_config() -> dict:
@@ -1102,9 +1105,9 @@ def _open_cli_page(config: dict) -> None:
     API host by mapping the `api.` prefix to `chat.`; on demo the host
     already starts with `demo.chat.`, so it is preserved as-is.
     """
-    api_base = config.get("PERSOIA_API_BASE", "https://api.persoia.com/v1")
+    api_base = config.get("PERSOIA_API_BASE", "https://chat.persoia.com/v1")
     parsed = urllib.parse.urlparse(api_base)
-    host = (parsed.hostname or "api.persoia.com").lower()
+    host = (parsed.hostname or "chat.persoia.com").lower()
     if host.startswith("api."):
         portal_host = "chat." + host[len("api."):]
     elif host.startswith("chat.") or ".chat." in host:
@@ -1897,7 +1900,7 @@ Usage:
   persoia help (--help, -h)        Affiche cette aide
 
 Le modèle IA est déterminé automatiquement par votre abonnement PersoIA.
-Toutes les requêtes transitent par api.persoia.com (auth, audit, facturation).
+Toutes les requêtes transitent par l'API PersoIA (auth, audit, facturation).
 
 Exemples:
   persoia login                           # Connexion interactive
