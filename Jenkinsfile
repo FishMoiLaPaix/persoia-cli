@@ -311,7 +311,8 @@ PY
                             VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
                             VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/
                             # Smoke : le .deb annonce la bonne version, les fichiers existent.
-                            dpkg-deb -f "dist/persoia_${VER}_amd64.deb" Version | grep -q "$VER"
+                            # nfpm inclut la révision (-1) dans le nom du .deb.
+                            dpkg-deb -f "dist/persoia_${VER}-1_amd64.deb" Version | grep -q "$VER"
                             ls dist/*.rpm >/dev/null
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-linux-x64', fingerprint: true
@@ -497,7 +498,7 @@ PY
                           # stables pour le README) à côté des noms versionnés.
                           cp "persoia-${VER}-x64.msi"      persoia-x64.msi
                           cp "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg
-                          cp "persoia_${VER}_amd64.deb"    persoia-amd64.deb
+                          cp "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb
                           cp "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm
                           # SHA256SUMS covers both names; `persoia update` looks
                           # up the versionless entry, humans verify the versioned.
@@ -507,7 +508,7 @@ PY
                             "persoia-${VER}-linux-x64" "persoia-${VER}-darwin-arm64" "persoia-${VER}-windows-x64.exe" \
                             "persoia-${VER}-x64.msi"      persoia-x64.msi \
                             "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg \
-                            "persoia_${VER}_amd64.deb"    persoia-amd64.deb \
+                            "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb \
                             "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm \
                             > SHA256SUMS )
 
@@ -522,7 +523,7 @@ PY
                             "dist/persoia-${VER}-windows-x64.exe" \
                             "dist/persoia-${VER}-x64.msi"      dist/persoia-x64.msi \
                             "dist/persoia-${VER}-arm64.pkg"    dist/persoia-arm64.pkg \
-                            "dist/persoia_${VER}_amd64.deb"    dist/persoia-amd64.deb \
+                            "dist/persoia_${VER}-1_amd64.deb"  dist/persoia-amd64.deb \
                             "dist/persoia-${VER}-1.x86_64.rpm" dist/persoia-x86_64.rpm \
                             dist/SHA256SUMS
 

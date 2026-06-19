@@ -77,6 +77,7 @@ VERSION=0.6.0 nfpm package --config packaging/linux/nfpm.yaml --packager rpm --t
 ```
 
 Nécessite [`nfpm`](https://nfpm.goreleaser.com). Installe dans `/usr/bin/persoia`.
+Sorties : `persoia_<ver>-1_amd64.deb` et `persoia-<ver>-1.x86_64.rpm`.
 
 ## Homebrew (`homebrew/`)
 
