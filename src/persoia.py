@@ -38,7 +38,7 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 def collect_persoia_md_files() -> list[Path]:
@@ -1166,6 +1166,11 @@ def _browser_login(config: dict, timeout: int = 180) -> dict | None:
     by POSTing JSON `{token, state, api_base?, model?, tenant_name?}` (the
     token never appears in a URL), with a GET `?token=&state=` fallback.
 
+    The callback URL uses the literal IPv4 address ``127.0.0.1`` rather than
+    ``localhost`` on purpose: on modern macOS/Linux ``localhost`` may resolve
+    to the IPv6 loopback ``::1``, and a browser fetch from chat.persoia.com
+    would then fail to reach a CLI server bound only on the IPv4 loopback.
+
     Returns the captured values on success, or None on timeout/failure.
     """
     portal = _portal_base(config)
@@ -1262,6 +1267,8 @@ def _browser_login(config: dict, timeout: int = 180) -> dict | None:
         return None
 
     port = server.server_address[1]
+    # Bind/advertise the loopback on the literal IPv4 address (not
+    # ``localhost``, which may resolve to ``::1`` and break the browser fetch).
     callback = f"http://127.0.0.1:{port}/callback"
     authorize_url = (
         f"{portal}/cli?callback={urllib.parse.quote(callback, safe='')}"
@@ -2381,8 +2388,11 @@ Usage:
   persoia login [--no-browser]     Connexion via le navigateur (par défaut) :
                                    ouvre chat.persoia.com, vous vous connectez
                                    sur le site, et le token CLI est récupéré
-                                   automatiquement. --no-browser bascule sur la
-                                   connexion email / mot de passe (headless/SSH).
+                                   automatiquement via un rappel local sur
+                                   http://127.0.0.1:<port> (adresse IPv4 explicite,
+                                   pas 'localhost', qui peut pointer sur ::1).
+                                   --no-browser bascule sur la connexion
+                                   email / mot de passe (headless/SSH).
   persoia logout                   Déconnexion (supprime la clé API locale)
   persoia init                     Génère un fichier PERSOIA.md pour le projet
   persoia code [FILES...] [-y/--yes] [--no-discover] [AIDER_ARGS...]

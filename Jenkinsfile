@@ -234,6 +234,13 @@ if twice != healed:
 
 print("OK: French directive guaranteed (incl. wrong-body normalization)")
 PY
+
+                            # --- pytest suite: browser-login loopback flow ---
+                            # Covers _valid_api_base allowlist, the anti-CSRF
+                            # state rejection, and the loopback callback handler
+                            # (deterministic, loopback-only, no real browser).
+                            python3 -m pip install --quiet --disable-pip-version-check pytest
+                            python3 -m pytest -q tests/test_browser_login.py
                         '''
                     }
                 }

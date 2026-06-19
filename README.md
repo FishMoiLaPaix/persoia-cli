@@ -61,9 +61,12 @@ chmod 600 ~/.config/persoia/config.env
 
 Ou via `persoia login` : ouvre `chat.persoia.com` dans le navigateur, vous vous
 connectez sur le site (qui vérifie vos droits et votre tenant), et le token CLI
-dédié est récupéré automatiquement puis écrit dans la config. En environnement
-sans navigateur (headless/SSH), utilisez `persoia login --no-browser` (email /
-mot de passe).
+dédié est récupéré automatiquement puis écrit dans la config. La récupération
+passe par un rappel local que le CLI écoute sur `http://127.0.0.1:<port>` —
+l'adresse IPv4 explicite est utilisée volontairement (et non `localhost`, qui
+peut résoudre vers la boucle IPv6 `::1` et empêcher le navigateur de joindre le
+serveur local). En environnement sans navigateur (headless/SSH), utilisez
+`persoia login --no-browser` (email / mot de passe).
 
 Le préfixe de la clé route automatiquement :
 - `persoia_demo_sk_*` → `https://demo.chat.persoia.com/v1`
