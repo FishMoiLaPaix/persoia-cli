@@ -343,23 +343,35 @@ PY
                                         stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
                                     }
                                 }
-                            } catch (err) {
-                                // A missing/offline mac agent must never block
-                                // the pipeline:
+                            } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException err) {
+                                // INFRASTRUCTURE failure only: the timeout fired
+                                // because no mac agent was available to pick up
+                                // node('mac-arm64'). This must never block the
+                                // pipeline — degrade gracefully:
                                 //  - PR builds (env.CHANGE_ID set): reset to
-                                //    SUCCESS so the missing agent doesn't block
+                                //    SUCCESS so a missing agent doesn't block
                                 //    merges (the GitHub Checks plugin maps
                                 //    UNSTABLE → 'failure', which would block).
                                 //  - tag/main builds: mark UNSTABLE and let the
-                                //    Release stage publish a PARTIAL release
-                                //    (the platforms that did build). The Release
-                                //    stage tolerates the missing darwin binary
-                                //    and labels the release as partial.
-                                echo "mac-arm64 stage unavailable: ${err}"
+                                //    Release stage publish a PARTIAL release (the
+                                //    platforms that did build).
+                                echo "mac-arm64 agent unavailable (timeout): ${err}"
                                 if (env.CHANGE_ID) {
                                     currentBuild.result = 'SUCCESS'
                                 } else {
                                     currentBuild.result = 'UNSTABLE'
+                                }
+                            } catch (err) {
+                                // A REAL build/test failure of the mac binary
+                                // (PyInstaller error, smoke-test failure, …).
+                                // Do NOT ship a partial release that hides a
+                                // broken mac build: tolerate only on PR builds
+                                // (don't block merges), hard-fail on tag/main.
+                                echo "mac-arm64 build failed: ${err}"
+                                if (env.CHANGE_ID) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else {
+                                    throw err
                                 }
                             }
                         }
@@ -441,7 +453,16 @@ PY
                             unstash stashName
                             present.add(platform)
                         } catch (err) {
-                            echo "⚠️  ${stashName} indisponible (agent absent ?) — exclu de la release partielle: ${err}"
+                            // Tolerate ONLY a genuinely absent stash (the
+                            // platform stage was skipped, e.g. agent offline).
+                            // Any other error (stash corruption, Jenkins FS
+                            // problem) must NOT be silently turned into a
+                            // partial release — rethrow it.
+                            if (err.getMessage()?.contains('No such saved stash')) {
+                                echo "⚠️  ${stashName} indisponible (stage non exécuté ?) — exclu de la release partielle"
+                            } else {
+                                throw err
+                            }
                         }
                     }
                     if (present.isEmpty()) {
@@ -502,14 +523,25 @@ PY
                             cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
                             UPLOADS="$UPLOADS persoia-windows-x64.exe persoia-${VER}-windows-x64.exe"
                           fi
-                          # SHA256SUMS covers the published names only; `persoia
-                          # update` looks up the versionless entry, humans verify
-                          # the versioned.
+                          # Per-asset <name>.sha256 sidecars: `persoia update`
+                          # reads these FIRST (then falls back to SHA256SUMS).
+                          # They make partial RE-RUNS safe — each rerun only
+                          # clobbers the sidecars of the platforms it republishes,
+                          # so a rerun missing a platform can never drop an
+                          # already-published checksum (which a regenerated, now
+                          # incomplete, SHA256SUMS would).
+                          SIDECARS=""
+                          for f in $UPLOADS; do
+                            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+                            SIDECARS="$SIDECARS $f.sha256"
+                          done
+                          # SHA256SUMS stays as a convenience manifest for humans;
+                          # it reflects only the platforms published in THIS run.
                           sha256sum $UPLOADS > SHA256SUMS
                           gh release upload "${RELEASE_TAG}" \
                             --repo FishMoiLaPaix/persoia-cli \
                             --clobber \
-                            $UPLOADS SHA256SUMS )
+                            $UPLOADS $SIDECARS SHA256SUMS )
                     '''
                 }
             }
