@@ -1233,8 +1233,9 @@ def _browser_login(config: dict, timeout: int = 180) -> dict | None:
             self.send_response(204)
             self._cors()
             # Chrome/Edge "Private Network Access": a request from a secure
-            # public origin (https://chat.persoia.com) to a private/loopback
-            # address (127.0.0.1) is gated behind a preflight carrying
+            # public origin (the portal, e.g. https://chat.persoia.com or the
+            # demo portal) to a private/loopback address (127.0.0.1) is gated
+            # behind a preflight carrying
             # `Access-Control-Request-Private-Network: true`. Without an
             # explicit `Access-Control-Allow-Private-Network: true` in the
             # response, the browser blocks the POST and the portal reports
