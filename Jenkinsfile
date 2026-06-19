@@ -339,12 +339,17 @@ PY
                             }
 
                             if (!macReachable) {
-                                // No agent → skip fast. PR builds stay SUCCESS so
-                                // a missing agent never blocks merges; tag/main →
-                                // UNSTABLE so the Release stage publishes a PARTIAL
-                                // release (the platforms that did build).
+                                // No agent → skip fast.
+                                //  - PR builds: force SUCCESS to OVERRIDE the
+                                //    ABORTED that the Phase-1 timeout sets, so a
+                                //    missing agent never blocks merges (the GitHub
+                                //    Checks plugin maps ABORTED/UNSTABLE → failure).
+                                //  - tag/main: UNSTABLE so the Release stage
+                                //    publishes a PARTIAL release.
                                 echo 'Stage macOS ignoré (agent indisponible) — release partielle.'
-                                if (!env.CHANGE_ID) {
+                                if (env.CHANGE_ID) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else {
                                     currentBuild.result = 'UNSTABLE'
                                 }
                             } else {
