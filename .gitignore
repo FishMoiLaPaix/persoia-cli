@@ -14,6 +14,10 @@ build/
 dist/
 *.manifest
 
+# WiX (binaires portables tirés par packaging/windows/build-msi.ps1)
+.wix/
+wix314-binaries.zip
+
 # IDE
 .vscode/
 .idea/

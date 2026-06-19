@@ -4,7 +4,81 @@ Wrapper CLI souverain pour [PersoIA](https://www.persoia.com) — utilisez votre
 
 ## Installation
 
+La méthode recommandée est l'installateur natif de votre système. Les binaires
+bruts restent disponibles pour les installations manuelles / automatisées
+([plus bas](#installation-manuelle-avancée)).
+
+> Les installateurs ne sont **pas encore signés** : Windows SmartScreen et macOS
+> Gatekeeper afficheront un avertissement au premier lancement (voir les notes
+> par OS ci-dessous).
+
+### Windows (x64) — `.msi`
+
+Téléchargez et double-cliquez
+[**persoia-x64.msi**](https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-x64.msi)
+(dernière release). L'assistant s'installe **par utilisateur** (pas d'élévation
+administrateur), vous laisse **choisir le dossier** d'installation, ajoute
+`persoia` au `PATH`, et propose en fin d'installation de lancer la **connexion**
+pour configurer votre **clé API**.
+
+> **Redémarrez votre terminal** après l'install (le nouveau `PATH` n'est pas
+> hérité par la session courante).
+>
+> SmartScreen affiche « Windows a protégé votre ordinateur » → cliquez
+> **Informations complémentaires** puis **Exécuter quand même**.
+
+> Sans MSI (environnement verrouillé), une alternative en une ligne :
+> ```powershell
+> irm https://raw.githubusercontent.com/FishMoiLaPaix/persoia-cli/main/packaging/windows/install.ps1 | iex
+> ```
+> (équivalent CMD : `packaging/windows/install.cmd`).
+
 ### macOS (Apple Silicon)
+
+**Homebrew** (recommandé) :
+
+```bash
+brew install fishmoilapaix/tap/persoia
+```
+
+**Installateur `.pkg`** : téléchargez
+[**persoia-arm64.pkg**](https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-arm64.pkg)
+et ouvrez-le (installe dans `/usr/local/bin`, déjà sur le `PATH`).
+
+> `.pkg` non signé : si Gatekeeper bloque, **clic-droit sur le `.pkg` →
+> Ouvrir**, puis confirmez. (Homebrew ne déclenche pas cet avertissement.)
+
+### Linux (x64)
+
+**Homebrew** (recommandé) :
+
+```bash
+brew install fishmoilapaix/tap/persoia
+```
+
+**Debian / Ubuntu** (`.deb`) :
+
+```bash
+curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-amd64.deb -o persoia.deb
+sudo apt install ./persoia.deb
+```
+
+**Fedora / RHEL** (`.rpm`) :
+
+```bash
+curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download/persoia-x86_64.rpm -o persoia.rpm
+sudo dnf install ./persoia.rpm
+```
+
+Les paquets installent `persoia` dans `/usr/bin`.
+
+### Installation manuelle (avancée)
+
+Binaire brut, sans installateur — utile pour les environnements verrouillés ou
+les scripts d'automatisation.
+
+<details>
+<summary>macOS (Apple Silicon)</summary>
 
 ```bash
 mkdir -p ~/.local/bin
@@ -12,13 +86,14 @@ curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download
   -o ~/.local/bin/persoia && chmod +x ~/.local/bin/persoia
 ```
 
-> Si `~/.local/bin` n'est pas dans votre `PATH` (cas par défaut sur macOS), ajoutez-le une fois pour toutes :
+> Si `~/.local/bin` n'est pas dans votre `PATH` :
 > `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec $SHELL`
+>
+> Lever la quarantaine Gatekeeper : `xattr -d com.apple.quarantine ~/.local/bin/persoia`
+</details>
 
-> Premier lancement : macOS Gatekeeper bloque les binaires non signés. Lever la quarantaine :
-> `xattr -d com.apple.quarantine ~/.local/bin/persoia`
-
-### Linux (x64)
+<details>
+<summary>Linux (x64)</summary>
 
 ```bash
 mkdir -p ~/.local/bin
@@ -28,10 +103,10 @@ curl -fsSL https://github.com/FishMoiLaPaix/persoia-cli/releases/latest/download
 
 > Si `~/.local/bin` n'est pas dans votre `PATH` :
 > `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && exec $SHELL`
->
-> Alternative système-wide : déposer le binaire dans `/usr/local/bin/persoia` (sudo requis).
+</details>
 
-### Windows (x64)
+<details>
+<summary>Windows (x64)</summary>
 
 ```powershell
 New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\persoia"
@@ -47,9 +122,8 @@ if ($userPath -notlike "*$cliDir*") {
 }
 ```
 
-> **Redémarrez votre terminal** après l'install : la session PowerShell courante n'hérite pas du nouveau PATH utilisateur.
-
-> Premier lancement : Windows SmartScreen avertit pour les binaires non signés. Cliquer "Plus d'infos" puis "Exécuter quand même".
+> **Redémarrez votre terminal** après l'install.
+</details>
 
 ## Configuration
 
@@ -100,6 +174,11 @@ binaire correspondant à la plateforme et remplace l'exécutable en place. Si
 `persoia` tourne depuis les sources (non packagé), la commande indique d'utiliser
 `git pull`.
 
+> Installé via un gestionnaire de paquets (Homebrew, `.deb`/`.rpm`, `.msi`/`.pkg`) ?
+> Préférez la mise à jour par le gestionnaire (`brew upgrade persoia`, `apt`/`dnf`,
+> ré-installation du `.msi`/`.pkg`) pour garder sa base cohérente. `persoia update`
+> reste un fallback fonctionnel (il réécrit le binaire en place).
+
 ## Développement
 
 ```bash
@@ -129,6 +208,12 @@ binaire est publié sous deux noms : versionné (`persoia-<version>-<plateforme>
 pour épingler une version précise) et sans version (`persoia-<plateforme>`, alias
 « latest » utilisé par les commandes d'installation et par `persoia update`). Un
 manifeste `SHA256SUMS` accompagne chaque release pour la vérification d'intégrité.
+
+Chaque plateforme produit aussi son **installateur** (`.msi` Windows, `.pkg`
+macOS, `.deb`/`.rpm` Linux), publié sur la release sous les deux schémas de noms.
+Au tag, la formula **Homebrew** du tap `FishMoiLaPaix/homebrew-tap` est mise à
+jour automatiquement. Les sources de packaging et leur documentation sont dans
+[`packaging/`](packaging/).
 
 ## License
 

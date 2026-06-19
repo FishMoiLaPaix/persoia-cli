@@ -300,9 +300,24 @@ PY
                             grep -q "PERSOIA_API_KEY=persoia_demo_sk_mock_login_ci" /tmp/login.env
                             grep -q "PERSOIA_TENANT_NAME=Mock Tenant" /tmp/login.env
                             PERSOIA_CONFIG=/tmp/login.env "$BIN" config | grep -q "Clé API:"
+
+                            # --- Paquets .deb / .rpm via nfpm ---
+                            # nfpm est un binaire unique tiré dans le workspace
+                            # (même pattern « pull portable tool » que CPython).
+                            VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
+                            NFPM_VERSION=2.41.1
+                            curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+                                | tar xz -C /tmp nfpm
+                            VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
+                            VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/
+                            # Smoke : le .deb annonce la bonne version, les fichiers existent.
+                            dpkg-deb -f "dist/persoia_${VER}_amd64.deb" Version | grep -q "$VER"
+                            ls dist/*.rpm >/dev/null
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-linux-x64', fingerprint: true
+                        archiveArtifacts artifacts: 'dist/*.deb, dist/*.rpm', fingerprint: true
                         stash name: 'binary-linux-x64', includes: 'dist/persoia-linux-x64'
+                        stash name: 'installer-linux', includes: 'dist/*.deb, dist/*.rpm'
                     }
                 }
 
@@ -338,9 +353,16 @@ PY
                                             "$BIN" help    | grep -q "Assistant code souverain"
                                             : > /tmp/empty.env
                                             PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+
+                                            # --- Installateur .pkg (outils natifs macOS) ---
+                                            VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
+                                            bash packaging/macos/build-pkg.sh "$PWD/dist/persoia-darwin-arm64" "$VER"
+                                            test -f "dist/persoia-${VER}-arm64.pkg"
                                         '''
                                         archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                        archiveArtifacts artifacts: 'dist/*-arm64.pkg', fingerprint: true
                                         stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                        stash name: 'installer-macos', includes: 'dist/*-arm64.pkg'
                                     }
                                 }
                             } catch (err) {
@@ -411,9 +433,17 @@ PY
                             type NUL > %TEMP%\\empty.env
                             set PERSOIA_CONFIG=%TEMP%\\empty.env
                             %BIN% config  | findstr /C:"Non connect" >nul || exit /b 1
+
+                            REM --- Installateur MSI (WiX v3 portable) ---
+                            REM build-msi.ps1 extrait la version de src\\persoia.py et
+                            REM tire les binaires WiX dans .wix\\ si absents. Sortie :
+                            REM dist\\persoia-<ver>-x64.msi
+                            powershell -NoProfile -ExecutionPolicy Bypass -File packaging\\windows\\build-msi.ps1 -ExePath "%CD%\\dist\\persoia-windows-x64.exe" || exit /b 1
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-windows-x64.exe', fingerprint: true
+                        archiveArtifacts artifacts: 'dist/*-x64.msi', fingerprint: true
                         stash name: 'binary-windows-x64', includes: 'dist/persoia-windows-x64.exe'
+                        stash name: 'installer-windows', includes: 'dist/*-x64.msi'
                     }
                 }
             }
@@ -428,6 +458,9 @@ PY
                 unstash 'binary-linux-x64'
                 unstash 'binary-darwin-arm64'
                 unstash 'binary-windows-x64'
+                unstash 'installer-linux'
+                unstash 'installer-macos'
+                unstash 'installer-windows'
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
@@ -460,11 +493,22 @@ PY
                           cp persoia-linux-x64       "persoia-${VER}-linux-x64"
                           cp persoia-darwin-arm64    "persoia-${VER}-darwin-arm64"
                           cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
+                          # Installateurs : alias sans version (liens "latest"
+                          # stables pour le README) à côté des noms versionnés.
+                          cp "persoia-${VER}-x64.msi"      persoia-x64.msi
+                          cp "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg
+                          cp "persoia_${VER}_amd64.deb"    persoia-amd64.deb
+                          cp "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm
                           # SHA256SUMS covers both names; `persoia update` looks
                           # up the versionless entry, humans verify the versioned.
+                          # render-formula.sh y lit les empreintes darwin/linux.
                           sha256sum \
                             persoia-linux-x64 persoia-darwin-arm64 persoia-windows-x64.exe \
                             "persoia-${VER}-linux-x64" "persoia-${VER}-darwin-arm64" "persoia-${VER}-windows-x64.exe" \
+                            "persoia-${VER}-x64.msi"      persoia-x64.msi \
+                            "persoia-${VER}-arm64.pkg"    persoia-arm64.pkg \
+                            "persoia_${VER}_amd64.deb"    persoia-amd64.deb \
+                            "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm \
                             > SHA256SUMS )
 
                         gh release upload "${RELEASE_TAG}" \
@@ -476,7 +520,16 @@ PY
                             "dist/persoia-${VER}-linux-x64" \
                             "dist/persoia-${VER}-darwin-arm64" \
                             "dist/persoia-${VER}-windows-x64.exe" \
+                            "dist/persoia-${VER}-x64.msi"      dist/persoia-x64.msi \
+                            "dist/persoia-${VER}-arm64.pkg"    dist/persoia-arm64.pkg \
+                            "dist/persoia_${VER}_amd64.deb"    dist/persoia-amd64.deb \
+                            "dist/persoia-${VER}-1.x86_64.rpm" dist/persoia-x86_64.rpm \
                             dist/SHA256SUMS
+
+                        # Met à jour la formula Homebrew dans le tap (skip propre
+                        # si le tap n'existe pas encore). gh est déjà sur le PATH
+                        # et GH_TOKEN est exporté par withCredentials.
+                        VERSION="$VER" bash packaging/homebrew/render-formula.sh dist/SHA256SUMS
                     '''
                 }
             }

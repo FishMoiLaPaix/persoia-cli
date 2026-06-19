@@ -1,0 +1,40 @@
+# Formula Homebrew PersoIA CLI — générée par render-formula.sh à chaque release.
+# NE PAS éditer à la main dans le tap : modifier ce template puis re-render.
+#
+# Installe le binaire pré-buildé de la release GitHub (pas de compilation).
+# Placeholders remplacés au rendu : __VERSION__, __SHA_DARWIN_ARM64__, __SHA_LINUX_X64__.
+class Persoia < Formula
+  desc "Assistant code souverain — CLI PersoIA"
+  homepage "https://www.persoia.com"
+  version "__VERSION__"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/FishMoiLaPaix/persoia-cli/releases/download/v__VERSION__/persoia-__VERSION__-darwin-arm64"
+      sha256 "__SHA_DARWIN_ARM64__"
+    end
+    on_intel do
+      odie "PersoIA CLI n'est disponible que pour les Mac Apple Silicon (arm64)."
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/FishMoiLaPaix/persoia-cli/releases/download/v__VERSION__/persoia-__VERSION__-linux-x64"
+      sha256 "__SHA_LINUX_X64__"
+    end
+    on_arm do
+      odie "PersoIA CLI n'est disponible que pour Linux x86_64."
+    end
+  end
+
+  def install
+    # La release fournit un binaire unique nommé persoia-<ver>-<plateforme>.
+    bin.install Dir["persoia-*"].first => "persoia"
+  end
+
+  test do
+    assert_match "persoia #{version}", shell_output("#{bin}/persoia version")
+  end
+end
