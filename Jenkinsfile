@@ -440,12 +440,25 @@ PY
                                 --generate-notes
                         fi
 
-                        # Publish a SHA256SUMS manifest so `persoia update` can
-                        # verify binary integrity before swapping the executable.
-                        ( cd dist && sha256sum \
-                            persoia-linux-x64 \
-                            persoia-darwin-arm64 \
-                            persoia-windows-x64.exe > SHA256SUMS )
+                        # Publish each binary under two names:
+                        #  - versioned (persoia-<ver>-<platform>) for humans
+                        #    and archival, so the file on disk states its version;
+                        #  - versionless (persoia-<platform>) as the stable
+                        #    "latest" alias used by `persoia update` and the
+                        #    README curl commands. GitHub releases have no
+                        #    symlinks, so both copies are uploaded (identical
+                        #    content → identical SHA-256).
+                        VER="${RELEASE_TAG#v}"
+                        ( cd dist
+                          cp persoia-linux-x64       "persoia-${VER}-linux-x64"
+                          cp persoia-darwin-arm64    "persoia-${VER}-darwin-arm64"
+                          cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
+                          # SHA256SUMS covers both names; `persoia update` looks
+                          # up the versionless entry, humans verify the versioned.
+                          sha256sum \
+                            persoia-linux-x64 persoia-darwin-arm64 persoia-windows-x64.exe \
+                            "persoia-${VER}-linux-x64" "persoia-${VER}-darwin-arm64" "persoia-${VER}-windows-x64.exe" \
+                            > SHA256SUMS )
 
                         gh release upload "${RELEASE_TAG}" \
                             --repo FishMoiLaPaix/persoia-cli \
@@ -453,6 +466,9 @@ PY
                             dist/persoia-linux-x64 \
                             dist/persoia-darwin-arm64 \
                             dist/persoia-windows-x64.exe \
+                            "dist/persoia-${VER}-linux-x64" \
+                            "dist/persoia-${VER}-darwin-arm64" \
+                            "dist/persoia-${VER}-windows-x64.exe" \
                             dist/SHA256SUMS
                     '''
                 }

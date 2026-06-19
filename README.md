@@ -116,7 +116,11 @@ Build matrix Jenkins (`Jenkinsfile`) sur 3 plateformes :
 - `mac-arm64` — agent macOS dédié (label `mac-arm64`, à provisionner ; les PR builds tolèrent l'absence de l'agent — le tag-build hard-fail au stage Release sur l'unstash manquant)
 - `windows-x64` — agent permanent `windows-docker-agent` (label `windows-amd64` ; le build pull une distrib portable CPython 3.11 dans le workspace car l'agent n'a que Python 2.7 dans le PATH)
 
-Une release GitHub est publiée automatiquement à chaque tag `v*.*.*`.
+Une release GitHub est publiée automatiquement à chaque tag `v*.*.*`. Chaque
+binaire est publié sous deux noms : versionné (`persoia-<version>-<plateforme>`,
+pour épingler une version précise) et sans version (`persoia-<plateforme>`, alias
+« latest » utilisé par les commandes d'installation et par `persoia update`). Un
+manifeste `SHA256SUMS` accompagne chaque release pour la vérification d'intégrité.
 
 ## License
 
