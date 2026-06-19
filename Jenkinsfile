@@ -344,23 +344,22 @@ PY
                                     }
                                 }
                             } catch (err) {
-                                // For PR builds (env.CHANGE_ID set), reset the
-                                // result to SUCCESS so the PR check passes —
-                                // we don't want a missing mac agent to block
-                                // merges. The Release stage on tag/main builds
-                                // will hard-fail when it tries to unstash the
-                                // missing mac binary, so we never accidentally
-                                // ship an incomplete release.
-                                //
-                                // currentBuild.result = 'UNSTABLE' would have
-                                // worked semantically, but the Jenkins GitHub
-                                // Checks plugin maps UNSTABLE → conclusion
-                                // 'failure' which blocks the merge anyway.
-                                echo "mac-arm64 stage failed: ${err}"
+                                // A missing/offline mac agent must never block
+                                // the pipeline:
+                                //  - PR builds (env.CHANGE_ID set): reset to
+                                //    SUCCESS so the missing agent doesn't block
+                                //    merges (the GitHub Checks plugin maps
+                                //    UNSTABLE → 'failure', which would block).
+                                //  - tag/main builds: mark UNSTABLE and let the
+                                //    Release stage publish a PARTIAL release
+                                //    (the platforms that did build). The Release
+                                //    stage tolerates the missing darwin binary
+                                //    and labels the release as partial.
+                                echo "mac-arm64 stage unavailable: ${err}"
                                 if (env.CHANGE_ID) {
                                     currentBuild.result = 'SUCCESS'
                                 } else {
-                                    throw err
+                                    currentBuild.result = 'UNSTABLE'
                                 }
                             }
                         }
@@ -425,9 +424,37 @@ PY
             agent { label 'python311' }
             steps {
                 checkout scm
-                unstash 'binary-linux-x64'
-                unstash 'binary-darwin-arm64'
-                unstash 'binary-windows-x64'
+                script {
+                    // Tolerate a missing per-platform binary (e.g. the macOS
+                    // agent offline) so a PARTIAL release can still publish the
+                    // platforms that built. unstash throws when a stash is
+                    // absent — collect the ones that succeed and pass the set
+                    // to the upload step via env flags.
+                    def stashes = [
+                        'linux'  : 'binary-linux-x64',
+                        'darwin' : 'binary-darwin-arm64',
+                        'windows': 'binary-windows-x64',
+                    ]
+                    def present = []
+                    stashes.each { platform, stashName ->
+                        try {
+                            unstash stashName
+                            present.add(platform)
+                        } catch (err) {
+                            echo "⚠️  ${stashName} indisponible (agent absent ?) — exclu de la release partielle: ${err}"
+                        }
+                    }
+                    if (present.isEmpty()) {
+                        error('Aucun binaire disponible — release annulée')
+                    }
+                    if (present.size() < stashes.size()) {
+                        echo "⚠️  Release PARTIELLE : plateformes publiées = ${present.join(', ')} (manquantes = ${(stashes.keySet() as List) - present})"
+                        currentBuild.result = 'UNSTABLE'
+                    }
+                    env.RELEASE_HAS_LINUX   = present.contains('linux')   ? 'true' : 'false'
+                    env.RELEASE_HAS_DARWIN  = present.contains('darwin')  ? 'true' : 'false'
+                    env.RELEASE_HAS_WINDOWS = present.contains('windows') ? 'true' : 'false'
+                }
                 withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
@@ -456,27 +483,33 @@ PY
                         #    symlinks, so both copies are uploaded (identical
                         #    content → identical SHA-256).
                         VER="${RELEASE_TAG#v}"
+                        # Only publish the platforms that built (partial release
+                        # tolerated — e.g. macOS agent offline). Each present
+                        # binary is uploaded under two names: versionless (the
+                        # stable "latest" alias used by `persoia update` and the
+                        # README curl) and versioned (persoia-<ver>-<platform>).
                         ( cd dist
-                          cp persoia-linux-x64       "persoia-${VER}-linux-x64"
-                          cp persoia-darwin-arm64    "persoia-${VER}-darwin-arm64"
-                          cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
-                          # SHA256SUMS covers both names; `persoia update` looks
-                          # up the versionless entry, humans verify the versioned.
-                          sha256sum \
-                            persoia-linux-x64 persoia-darwin-arm64 persoia-windows-x64.exe \
-                            "persoia-${VER}-linux-x64" "persoia-${VER}-darwin-arm64" "persoia-${VER}-windows-x64.exe" \
-                            > SHA256SUMS )
-
-                        gh release upload "${RELEASE_TAG}" \
+                          UPLOADS=""
+                          if [ "${RELEASE_HAS_LINUX}" = "true" ]; then
+                            cp persoia-linux-x64 "persoia-${VER}-linux-x64"
+                            UPLOADS="$UPLOADS persoia-linux-x64 persoia-${VER}-linux-x64"
+                          fi
+                          if [ "${RELEASE_HAS_DARWIN}" = "true" ]; then
+                            cp persoia-darwin-arm64 "persoia-${VER}-darwin-arm64"
+                            UPLOADS="$UPLOADS persoia-darwin-arm64 persoia-${VER}-darwin-arm64"
+                          fi
+                          if [ "${RELEASE_HAS_WINDOWS}" = "true" ]; then
+                            cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
+                            UPLOADS="$UPLOADS persoia-windows-x64.exe persoia-${VER}-windows-x64.exe"
+                          fi
+                          # SHA256SUMS covers the published names only; `persoia
+                          # update` looks up the versionless entry, humans verify
+                          # the versioned.
+                          sha256sum $UPLOADS > SHA256SUMS
+                          gh release upload "${RELEASE_TAG}" \
                             --repo FishMoiLaPaix/persoia-cli \
                             --clobber \
-                            dist/persoia-linux-x64 \
-                            dist/persoia-darwin-arm64 \
-                            dist/persoia-windows-x64.exe \
-                            "dist/persoia-${VER}-linux-x64" \
-                            "dist/persoia-${VER}-darwin-arm64" \
-                            "dist/persoia-${VER}-windows-x64.exe" \
-                            dist/SHA256SUMS
+                            $UPLOADS SHA256SUMS )
                     '''
                 }
             }
