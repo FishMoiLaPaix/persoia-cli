@@ -5,7 +5,7 @@ The model is determined by the tenant's subscription and fetched
 from the API at startup. The user only needs an API key.
 
 Usage:
-    persoia login [--email EMAIL --password PASSWORD]
+    persoia login [--no-browser] [--email EMAIL --password PASSWORD]
     persoia logout
     persoia init
     persoia code [FILES...] [-y/--yes] [--no-discover] [aider args...]
@@ -18,15 +18,18 @@ Usage:
 
 import atexit
 import hashlib
+import http.server
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1099,13 +1102,14 @@ def _make_raw_template(scan: dict) -> str:
 
 # --- Commands ---
 
-def _open_cli_page(config: dict) -> None:
-    """Open the CLI settings page in the browser as fallback.
+def _portal_base(config: dict) -> str:
+    """Return the web portal origin (``https://<host>``) for the current env.
 
-    The user-facing portal lives at chat.persoia.com (frontend Vue/Quasar),
-    not at api.persoia.com (backend Go). Derive the portal host from the
-    API host by mapping the `api.` prefix to `chat.`; on demo the host
-    already starts with `demo.chat.`, so it is preserved as-is.
+    The user-facing portal (Vue/Quasar frontend, where the user logs in)
+    lives at the chat host, not at api.persoia.com (backend Go). Derive it
+    from the configured API base: map an `api.` prefix to `chat.`, keep an
+    existing `chat.`/`*.chat.` host as-is (demo uses `demo.chat.`), else fall
+    back to the production portal.
     """
     api_base = config.get("PERSOIA_API_BASE", "https://chat.persoia.com/v1")
     parsed = urllib.parse.urlparse(api_base)
@@ -1115,9 +1119,34 @@ def _open_cli_page(config: dict) -> None:
     elif host.startswith("chat.") or ".chat." in host:
         portal_host = host
     else:
-        # Fall back to the production portal — better than a 404.
         portal_host = "chat.persoia.com"
-    cli_url = f"https://{portal_host}/cli"
+    return f"https://{portal_host}"
+
+
+def _valid_api_base(raw: str) -> str:
+    """Return `raw` if it is a safe https persoia.com URL, else "".
+
+    Strict validation (not a substring match): the hostname must be exactly
+    `persoia.com` or a `.persoia.com` subdomain over https, so a value like
+    `https://evil.persoia.com.attacker.tld` is rejected.
+    """
+    raw = (raw or "").strip()
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and (parsed.hostname == "persoia.com" or parsed.hostname.endswith(".persoia.com"))
+    ):
+        return raw
+    return ""
+
+
+def _open_cli_page(config: dict) -> None:
+    """Open the CLI settings page in the browser as a manual fallback."""
+    cli_url = f"{_portal_base(config)}/cli"
     print()
     print(f"Ouverture de {cli_url} dans votre navigateur...")
     print("Créez une clé API depuis le portail, puis configurez-la avec :")
@@ -1127,15 +1156,149 @@ def _open_cli_page(config: dict) -> None:
     webbrowser.open(cli_url)
 
 
+def _browser_login(config: dict, timeout: int = 180) -> dict | None:
+    """Authenticate through the web portal and capture a CLI token.
+
+    Starts a loopback HTTP server on 127.0.0.1:<random>, opens the portal's
+    `/cli` authorize page with a `callback` (the loopback URL) and an
+    anti-CSRF `state`. The page logs the user in (verifying rights + tenant),
+    mints a dedicated CLI key, and delivers it back to the loopback endpoint —
+    by POSTing JSON `{token, state, api_base?, model?, tenant_name?}` (the
+    token never appears in a URL), with a GET `?token=&state=` fallback.
+
+    Returns the captured values on success, or None on timeout/failure.
+    """
+    portal = _portal_base(config)
+    state = secrets.token_urlsafe(24)
+    result: dict = {}
+    done = threading.Event()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def _cors(self) -> None:
+            # Only the portal origin may post the token to this loopback server.
+            self.send_header("Access-Control-Allow-Origin", portal)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+        def _page(self, status: int, message: str) -> None:
+            self.send_response(status)
+            self._cors()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            html = (
+                "<!doctype html><html lang='fr'><meta charset='utf-8'>"
+                "<title>PersoIA CLI</title>"
+                "<body style='font-family:sans-serif;text-align:center;margin-top:4em'>"
+                f"<h2>{message}</h2><p>Vous pouvez fermer cet onglet.</p></body></html>"
+            )
+            self.wfile.write(html.encode("utf-8"))
+
+        def _accept(self, token: str, got_state: str, extra: dict) -> bool:
+            # Constant-time state comparison to thwart timing oracles.
+            if not got_state or not secrets.compare_digest(got_state, state):
+                self._page(400, "État invalide — connexion refusée.")
+                return False
+            if not token:
+                self._page(400, "Token manquant.")
+                return False
+            result["token"] = token
+            api_base = _valid_api_base(extra.get("api_base", ""))
+            if api_base:
+                result["api_base"] = api_base
+            if extra.get("model"):
+                result["model"] = extra["model"]
+            if extra.get("tenant_name"):
+                result["tenant_name"] = extra["tenant_name"]
+            self._page(200, "Connexion réussie !")
+            return True
+
+        def do_OPTIONS(self) -> None:  # noqa: N802 — http.server interface
+            self.send_response(204)
+            self._cors()
+            self.end_headers()
+
+        def do_POST(self) -> None:  # noqa: N802 — http.server interface
+            if urllib.parse.urlparse(self.path).path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            if self._accept(str(data.get("token", "")), str(data.get("state", "")), data):
+                done.set()
+
+        def do_GET(self) -> None:  # noqa: N802 — http.server interface
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                return
+            q = urllib.parse.parse_qs(parsed.query)
+            extra = {
+                "api_base": q.get("api_base", [""])[0],
+                "model": q.get("model", [""])[0],
+                "tenant_name": q.get("tenant_name", [""])[0],
+            }
+            if self._accept(q.get("token", [""])[0], q.get("state", [""])[0], extra):
+                done.set()
+
+        def log_message(self, *args: object) -> None:
+            pass  # keep the loopback server silent
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    except OSError as e:
+        print(f"Impossible de démarrer le serveur local de connexion : {e}", file=sys.stderr)
+        return None
+
+    port = server.server_address[1]
+    callback = f"http://127.0.0.1:{port}/callback"
+    authorize_url = (
+        f"{portal}/cli?callback={urllib.parse.quote(callback, safe='')}"
+        f"&state={urllib.parse.quote(state, safe='')}"
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        print(f"Ouverture de {portal} pour la connexion...")
+        print("Si la page ne s'ouvre pas, collez cette URL dans votre navigateur :")
+        print(f"  {authorize_url}")
+        print()
+        print("En attente de la connexion dans le navigateur...")
+        webbrowser.open(authorize_url)
+        got = done.wait(timeout=timeout)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    if not got or "token" not in result:
+        return None
+    return result
+
+
 def cmd_login(args: list[str]) -> None:
-    """Authenticate via API, or open the browser as fallback."""
+    """Authenticate via the browser (default) or email/password (--no-browser)."""
+    no_browser = False
     email = ""
     password = ""
 
     # Parse flags
     i = 0
     while i < len(args):
-        if args[i] == "--email" and i + 1 < len(args):
+        if args[i] == "--no-browser":
+            no_browser = True
+            i += 1
+        elif args[i] == "--email" and i + 1 < len(args):
             email = args[i + 1]
             i += 2
         elif args[i] == "--password" and i + 1 < len(args):
@@ -1147,6 +1310,42 @@ def cmd_login(args: list[str]) -> None:
 
     config = load_config()
 
+    # Browser-based login is the default: the user authenticates on the web
+    # portal (which verifies their rights and resolves the tenant) and the CLI
+    # receives a dedicated token via a loopback callback — the password never
+    # touches the CLI. --no-browser (or passing --email/--password) selects the
+    # legacy email/password flow, useful for headless/SSH environments.
+    if not no_browser and not email and not password:
+        res = _browser_login(config)
+        if res:
+            save_values = {
+                "PERSOIA_API_KEY": res["token"],
+                "PERSOIA_API_BASE": res.get("api_base") or config["PERSOIA_API_BASE"],
+            }
+            if res.get("tenant_name"):
+                save_values["PERSOIA_TENANT_NAME"] = res["tenant_name"]
+            if res.get("model"):
+                save_values["PERSOIA_MODEL"] = res["model"]
+            save_config(save_values)
+            print()
+            print("Connexion réussie !")
+            if res.get("tenant_name"):
+                print(f"  Entreprise : {res['tenant_name']}")
+            if res.get("model"):
+                print(f"  Modèle     : {res['model']}")
+            print()
+            print(f"Configuration sauvegardée dans : {get_config_path()}")
+            print("Lancez 'persoia code' pour commencer.")
+            return
+        print("Connexion via le navigateur impossible ou expirée.", file=sys.stderr)
+        print(
+            "Repli sur la connexion email / mot de passe "
+            "(ou relancez avec 'persoia login --no-browser').",
+            file=sys.stderr,
+        )
+        print()
+
+    # --- Legacy email/password flow (fallback / --no-browser) ---
     # Interactive prompts
     if not email:
         try:
@@ -2179,7 +2378,11 @@ def cmd_help() -> None:
     print("""PersoIA CLI — Assistant code souverain
 
 Usage:
-  persoia login                    Connexion avec email et mot de passe
+  persoia login [--no-browser]     Connexion via le navigateur (par défaut) :
+                                   ouvre chat.persoia.com, vous vous connectez
+                                   sur le site, et le token CLI est récupéré
+                                   automatiquement. --no-browser bascule sur la
+                                   connexion email / mot de passe (headless/SSH).
   persoia logout                   Déconnexion (supprime la clé API locale)
   persoia init                     Génère un fichier PERSOIA.md pour le projet
   persoia code [FILES...] [-y/--yes] [--no-discover] [AIDER_ARGS...]
