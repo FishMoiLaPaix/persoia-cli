@@ -11,11 +11,13 @@ Usage:
     persoia code [FILES...] [-y/--yes] [--no-discover] [aider args...]
     persoia chat "message"
     persoia config
+    persoia update [--check] [--pre] [-y]
     persoia version [--version, -V]
     persoia help
 """
 
 import atexit
+import hashlib
 import json
 import os
 import platform
@@ -1872,6 +1874,301 @@ def cmd_chat(config: dict, message: str) -> None:
         sys.exit(0)
 
 
+GITHUB_REPO = "FishMoiLaPaix/persoia-cli"
+
+
+def _version_key(v: str) -> tuple:
+    """Build a comparable key from a version string (semver-ish).
+
+    Handles "X.Y.Z" and pre-release suffixes ("X.Y.Z-rc1"). A final
+    release ranks above any pre-release of the same core version, and
+    numeric pre-release identifiers are compared numerically (rc2 > rc1).
+    """
+    v = v.strip()
+    if v[:1] in ("v", "V"):
+        v = v[1:]
+    # Drop SemVer build metadata (+...): it never affects precedence.
+    v = v.partition("+")[0]
+    core, _, pre = v.partition("-")
+    nums = []
+    for part in core.split(".")[:3]:
+        m = re.match(r"\d+", part)
+        nums.append(int(m.group()) if m else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    if not pre:
+        # 1 ranks a final release above any pre-release (which use 0).
+        return (nums[0], nums[1], nums[2], 1, ())
+    ids = []
+    for part in pre.replace("-", ".").split("."):
+        m = re.match(r"^(\D*)(\d*)$", part)
+        if m is None:
+            # Unparseable identifier (mixed alphanum): keep it whole so the
+            # comparison stays total and never raises on an odd tag.
+            ids.append((part, 0))
+        else:
+            ids.append((m.group(1), int(m.group(2)) if m.group(2) else 0))
+    return (nums[0], nums[1], nums[2], 0, tuple(ids))
+
+
+def _update_asset_name() -> str | None:
+    """Return the release asset name for the current platform, or None."""
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        return "persoia-darwin-arm64"
+    if system == "Linux" and machine in ("x86_64", "amd64"):
+        return "persoia-linux-x64"
+    if system == "Windows" and machine in ("amd64", "x86_64"):
+        return "persoia-windows-x64.exe"
+    return None
+
+
+def _fetch_latest_release(include_pre: bool) -> dict | None:
+    """Fetch the latest release metadata from GitHub, or None on error.
+
+    With include_pre, lists releases and returns the highest version
+    (pre-releases included). Otherwise queries /releases/latest (stable
+    only); if no stable release exists yet (404), falls back to the list.
+    """
+    headers = {
+        "User-Agent": f"persoia-cli/{__version__}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        if include_pre:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                releases = json.loads(resp.read().decode("utf-8"))
+            releases = [r for r in releases if not r.get("draft")]
+            if not releases:
+                return None
+            releases.sort(
+                key=lambda r: _version_key(r.get("tag_name", "0")), reverse=True
+            )
+            return releases[0]
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and not include_pre:
+            # No stable release published yet — fall back to pre-releases.
+            return _fetch_latest_release(include_pre=True)
+        return None
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _download_and_replace(url: str, target: Path, expected_sha256: str | None) -> None:
+    """Download `url`, verify its checksum, then atomically replace `target`.
+
+    The temp file is created in the target directory so os.replace stays on
+    one filesystem. When `expected_sha256` is provided, the download is
+    verified before it is allowed to replace the binary (raises ValueError on
+    mismatch). On Windows the running executable can't be overwritten in
+    place, so the current binary is moved aside first and restored on failure;
+    the leftover is cleaned best-effort (it may still be locked while running).
+    """
+    headers = {"User-Agent": f"persoia-cli/{__version__}"}
+    req = urllib.request.Request(url, headers=headers)
+    fd, tmp_path = tempfile.mkstemp(prefix=".persoia-update-", dir=str(target.parent))
+    tmp = Path(tmp_path)
+    try:
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "wb") as out:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                for chunk in iter(lambda: resp.read(65536), b""):
+                    digest.update(chunk)
+                    out.write(chunk)
+        if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+            raise ValueError(
+                f"checksum SHA-256 invalide (attendu {expected_sha256[:12]}…, "
+                f"obtenu {digest.hexdigest()[:12]}…)"
+            )
+        if os.name != "nt":
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, target)
+        else:
+            old = target.with_suffix(target.suffix + ".old")
+            try:
+                if old.exists():
+                    old.unlink()
+            except OSError:
+                pass
+            os.replace(target, old)   # move the running exe aside
+            try:
+                os.replace(tmp, target)   # drop the new exe in place
+            except OSError:
+                # Roll back so the CLI isn't left without a binary.
+                try:
+                    os.replace(old, target)
+                except OSError:
+                    pass
+                raise
+            try:
+                old.unlink()          # best-effort; may be locked while running
+            except OSError:
+                pass
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _fetch_expected_sha256(release: dict, asset_name: str) -> str | None:
+    """Return the published SHA-256 for `asset_name`, or None if unavailable.
+
+    Looks first for a per-asset `<name>.sha256` file, then for a combined
+    `SHA256SUMS` manifest (one `<hash>  <name>` line per asset). Returns None
+    when no checksum is published or it can't be fetched/parsed.
+    """
+    assets = {a.get("name"): a for a in release.get("assets", [])}
+    headers = {"User-Agent": f"persoia-cli/{__version__}"}
+
+    def _download_text(asset: dict | None) -> str | None:
+        if not asset or not asset.get("browser_download_url"):
+            return None
+        try:
+            req = urllib.request.Request(asset["browser_download_url"], headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, OSError):
+            return None
+
+    hex_re = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+    text = _download_text(assets.get(f"{asset_name}.sha256"))
+    if text:
+        m = hex_re.search(text)
+        if m:
+            return m.group(0)
+
+    text = _download_text(assets.get("SHA256SUMS"))
+    if text:
+        for line in text.splitlines():
+            if asset_name in line:
+                m = hex_re.search(line)
+                if m:
+                    return m.group(0)
+    return None
+
+
+def cmd_update(args: list[str]) -> None:
+    """Check for a newer release and replace the running binary."""
+    check_only = "--check" in args
+    assume_yes = "--yes" in args or "-y" in args
+    include_pre = "--pre" in args
+
+    # Self-update only makes sense for the packaged (frozen) binary; running
+    # from source has no binary to swap.
+    if not getattr(sys, "frozen", False):
+        print("persoia s'exécute depuis les sources, pas depuis un binaire packagé.")
+        print("Mettez à jour avec : git pull (puis rebuild via pyinstaller).")
+        return
+
+    asset_name = _update_asset_name()
+    if asset_name is None:
+        print(
+            "Plateforme non supportée pour la mise à jour automatique : "
+            f"{platform.system()} {platform.machine()}",
+            file=sys.stderr,
+        )
+        print(
+            f"Téléchargez le binaire manuellement : https://github.com/{GITHUB_REPO}/releases",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print("Recherche de mises à jour...")
+    release = _fetch_latest_release(include_pre)
+    if release is None:
+        print(
+            "Impossible de récupérer les informations de version depuis GitHub.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    latest = release.get("tag_name", "").strip()
+    if not latest:
+        print("Réponse GitHub inattendue (tag manquant).", file=sys.stderr)
+        sys.exit(1)
+
+    if _version_key(latest) <= _version_key(__version__):
+        print(f"Déjà à jour (version {__version__}).")
+        return
+
+    print(f"Nouvelle version disponible : {latest} (actuelle : {__version__})")
+
+    asset = next(
+        (a for a in release.get("assets", []) if a.get("name") == asset_name), None
+    )
+    if asset is None:
+        print(f"Aucun binaire '{asset_name}' dans la release {latest}.", file=sys.stderr)
+        print(
+            f"Téléchargez-le manuellement : "
+            f"https://github.com/{GITHUB_REPO}/releases/tag/{latest}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if check_only:
+        print("Lancez 'persoia update' pour l'installer.")
+        return
+
+    if not assume_yes:
+        try:
+            reply = input(f"Installer {latest} ? [O/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if reply and reply not in ("o", "oui", "y", "yes"):
+            print("Mise à jour annulée.")
+            return
+
+    download_url = asset.get("browser_download_url")
+    if not download_url:
+        print("URL de téléchargement absente de la release.", file=sys.stderr)
+        sys.exit(1)
+
+    target = Path(sys.executable).resolve()
+
+    expected_sha256 = _fetch_expected_sha256(release, asset_name)
+    if expected_sha256:
+        print("Empreinte SHA-256 trouvée — vérification d'intégrité activée.")
+    else:
+        print(
+            "Aucune empreinte SHA-256 publiée pour cette release — "
+            "intégrité du binaire non vérifiée.",
+            file=sys.stderr,
+        )
+
+    print(f"Téléchargement de {asset_name}...")
+    try:
+        _download_and_replace(download_url, target, expected_sha256)
+    except PermissionError:
+        print(f"Permission refusée pour écrire {target}.", file=sys.stderr)
+        print(
+            "Relancez avec les privilèges requis (sudo) ou réinstallez manuellement.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except ValueError as e:
+        # Checksum mismatch — the binary was NOT installed.
+        print(f"Mise à jour refusée : {e}", file=sys.stderr)
+        print("Le binaire n'a pas été remplacé.", file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"Échec de la mise à jour : {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Mise à jour réussie : {__version__} → {latest}")
+    print("Relancez 'persoia version' pour vérifier.")
+
+
 def cmd_version() -> None:
     """Display version information."""
     print(f"persoia {__version__}")
@@ -1896,6 +2193,12 @@ Usage:
                                    trouvées (désactivable avec --no-discover).
   persoia chat "message"           Mode chat rapide (une question)
   persoia config                   Affiche la configuration active
+  persoia update [--check] [--pre] [-y]
+                                   Vérifie et installe la dernière version du
+                                   binaire depuis les releases GitHub.
+                                   --check : vérifie sans installer.
+                                   --pre   : inclut les pré-versions (rc/beta).
+                                   -y/--yes: installe sans confirmation.
   persoia version (--version, -V)  Affiche la version du CLI
   persoia help (--help, -h)        Affiche cette aide
 
@@ -1912,6 +2215,8 @@ Exemples:
   persoia code -y nouveau.log             # Crée nouveau.log et l'ajoute
   persoia chat "Explique ce Dockerfile"   # Question rapide
   persoia config                          # Vérifie la configuration
+  persoia update                          # Met à jour le binaire
+  persoia update --check                  # Vérifie sans installer
   persoia logout                          # Déconnexion
 
 Astuce dans aider :
@@ -1950,6 +2255,8 @@ def main() -> None:
         cmd_chat(config, " ".join(args))
     elif command == "config":
         cmd_config(config)
+    elif command == "update":
+        cmd_update(args)
     elif command in ("version", "--version", "-V"):
         cmd_version()
     elif command in ("help", "--help", "-h"):

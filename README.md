@@ -74,8 +74,23 @@ persoia config               # Afficher la configuration courante
 persoia init                 # Créer un PERSOIA.md dans le projet
 persoia chat "question"      # Chat one-shot
 persoia code [aider args]    # Lance aider connecté à votre instance
+persoia update               # Met à jour le binaire (releases GitHub)
 persoia logout               # Effacer la clé locale
 ```
+
+### Mise à jour
+
+```bash
+persoia update            # Vérifie et installe la dernière version
+persoia update --check    # Vérifie seulement, sans installer
+persoia update --pre      # Inclut les pré-versions (rc/beta)
+persoia update -y         # Installe sans confirmation
+```
+
+`persoia update` compare la version locale aux releases GitHub, télécharge le
+binaire correspondant à la plateforme et remplace l'exécutable en place. Si
+`persoia` tourne depuis les sources (non packagé), la commande indique d'utiliser
+`git pull`.
 
 ## Développement
 
