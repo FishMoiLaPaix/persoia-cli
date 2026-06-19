@@ -440,12 +440,20 @@ PY
                                 --generate-notes
                         fi
 
+                        # Publish a SHA256SUMS manifest so `persoia update` can
+                        # verify binary integrity before swapping the executable.
+                        ( cd dist && sha256sum \
+                            persoia-linux-x64 \
+                            persoia-darwin-arm64 \
+                            persoia-windows-x64.exe > SHA256SUMS )
+
                         gh release upload "${RELEASE_TAG}" \
                             --repo FishMoiLaPaix/persoia-cli \
                             --clobber \
                             dist/persoia-linux-x64 \
                             dist/persoia-darwin-arm64 \
-                            dist/persoia-windows-x64.exe
+                            dist/persoia-windows-x64.exe \
+                            dist/SHA256SUMS
                     '''
                 }
             }

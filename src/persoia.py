@@ -17,6 +17,7 @@ Usage:
 """
 
 import atexit
+import hashlib
 import json
 import os
 import platform
@@ -1883,6 +1884,8 @@ def _version_key(v: str) -> tuple:
     v = v.strip()
     if v[:1] in ("v", "V"):
         v = v[1:]
+    # Drop SemVer build metadata (+...): it never affects precedence.
+    v = v.partition("+")[0]
     core, _, pre = v.partition("-")
     nums = []
     for part in core.split(".")[:3]:
@@ -1896,7 +1899,12 @@ def _version_key(v: str) -> tuple:
     ids = []
     for part in pre.replace("-", ".").split("."):
         m = re.match(r"^(\D*)(\d*)$", part)
-        ids.append((m.group(1), int(m.group(2)) if m.group(2) else 0))
+        if m is None:
+            # Unparseable identifier (mixed alphanum): keep it whole so the
+            # comparison stays total and never raises on an odd tag.
+            ids.append((part, 0))
+        else:
+            ids.append((m.group(1), int(m.group(2)) if m.group(2) else 0))
     return (nums[0], nums[1], nums[2], 0, tuple(ids))
 
 
@@ -1950,22 +1958,32 @@ def _fetch_latest_release(include_pre: bool) -> dict | None:
         return None
 
 
-def _download_and_replace(url: str, target: Path) -> None:
-    """Download `url` and atomically replace `target` with it.
+def _download_and_replace(url: str, target: Path, expected_sha256: str | None) -> None:
+    """Download `url`, verify its checksum, then atomically replace `target`.
 
     The temp file is created in the target directory so os.replace stays on
-    one filesystem. On Windows the running executable can't be overwritten in
-    place, so the current binary is moved aside first; the leftover is cleaned
-    best-effort (it may still be locked while running).
+    one filesystem. When `expected_sha256` is provided, the download is
+    verified before it is allowed to replace the binary (raises ValueError on
+    mismatch). On Windows the running executable can't be overwritten in
+    place, so the current binary is moved aside first and restored on failure;
+    the leftover is cleaned best-effort (it may still be locked while running).
     """
     headers = {"User-Agent": f"persoia-cli/{__version__}"}
     req = urllib.request.Request(url, headers=headers)
     fd, tmp_path = tempfile.mkstemp(prefix=".persoia-update-", dir=str(target.parent))
     tmp = Path(tmp_path)
     try:
+        digest = hashlib.sha256()
         with os.fdopen(fd, "wb") as out:
             with urllib.request.urlopen(req, timeout=180) as resp:
-                shutil.copyfileobj(resp, out)
+                for chunk in iter(lambda: resp.read(65536), b""):
+                    digest.update(chunk)
+                    out.write(chunk)
+        if expected_sha256 and digest.hexdigest().lower() != expected_sha256.lower():
+            raise ValueError(
+                f"checksum SHA-256 invalide (attendu {expected_sha256[:12]}…, "
+                f"obtenu {digest.hexdigest()[:12]}…)"
+            )
         if os.name != "nt":
             os.chmod(tmp, 0o755)
             os.replace(tmp, target)
@@ -1977,7 +1995,15 @@ def _download_and_replace(url: str, target: Path) -> None:
             except OSError:
                 pass
             os.replace(target, old)   # move the running exe aside
-            os.replace(tmp, target)   # drop the new exe in place
+            try:
+                os.replace(tmp, target)   # drop the new exe in place
+            except OSError:
+                # Roll back so the CLI isn't left without a binary.
+                try:
+                    os.replace(old, target)
+                except OSError:
+                    pass
+                raise
             try:
                 old.unlink()          # best-effort; may be locked while running
             except OSError:
@@ -1988,6 +2014,44 @@ def _download_and_replace(url: str, target: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def _fetch_expected_sha256(release: dict, asset_name: str) -> str | None:
+    """Return the published SHA-256 for `asset_name`, or None if unavailable.
+
+    Looks first for a per-asset `<name>.sha256` file, then for a combined
+    `SHA256SUMS` manifest (one `<hash>  <name>` line per asset). Returns None
+    when no checksum is published or it can't be fetched/parsed.
+    """
+    assets = {a.get("name"): a for a in release.get("assets", [])}
+    headers = {"User-Agent": f"persoia-cli/{__version__}"}
+
+    def _download_text(asset: dict | None) -> str | None:
+        if not asset or not asset.get("browser_download_url"):
+            return None
+        try:
+            req = urllib.request.Request(asset["browser_download_url"], headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, OSError):
+            return None
+
+    hex_re = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+    text = _download_text(assets.get(f"{asset_name}.sha256"))
+    if text:
+        m = hex_re.search(text)
+        if m:
+            return m.group(0)
+
+    text = _download_text(assets.get("SHA256SUMS"))
+    if text:
+        for line in text.splitlines():
+            if asset_name in line:
+                m = hex_re.search(line)
+                if m:
+                    return m.group(0)
+    return None
 
 
 def cmd_update(args: list[str]) -> None:
@@ -2068,15 +2132,31 @@ def cmd_update(args: list[str]) -> None:
         sys.exit(1)
 
     target = Path(sys.executable).resolve()
+
+    expected_sha256 = _fetch_expected_sha256(release, asset_name)
+    if expected_sha256:
+        print("Empreinte SHA-256 trouvée — vérification d'intégrité activée.")
+    else:
+        print(
+            "Aucune empreinte SHA-256 publiée pour cette release — "
+            "intégrité du binaire non vérifiée.",
+            file=sys.stderr,
+        )
+
     print(f"Téléchargement de {asset_name}...")
     try:
-        _download_and_replace(download_url, target)
+        _download_and_replace(download_url, target, expected_sha256)
     except PermissionError:
         print(f"Permission refusée pour écrire {target}.", file=sys.stderr)
         print(
             "Relancez avec les privilèges requis (sudo) ou réinstallez manuellement.",
             file=sys.stderr,
         )
+        sys.exit(1)
+    except ValueError as e:
+        # Checksum mismatch — the binary was NOT installed.
+        print(f"Mise à jour refusée : {e}", file=sys.stderr)
+        print("Le binaire n'a pas été remplacé.", file=sys.stderr)
         sys.exit(1)
     except (urllib.error.URLError, OSError) as e:
         print(f"Échec de la mise à jour : {e}", file=sys.stderr)
