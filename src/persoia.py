@@ -2383,7 +2383,9 @@ def cmd_update(args: list[str]) -> None:
         sys.exit(1)
 
     print(f"Mise à jour réussie : {__version__} → {latest}")
-    print(f"Relancez '{target} version' pour vérifier.")
+    # Double-quote the path so the hint is copy/pasteable in both POSIX shells
+    # and Windows cmd.exe, including paths with spaces (e.g. C:\Program Files\).
+    print(f'Relancez "{target}" version pour vérifier.')
 
     # Warn when the binary just updated is NOT the `persoia` resolved on PATH:
     # the user updated one copy (e.g. a versioned download) while their
