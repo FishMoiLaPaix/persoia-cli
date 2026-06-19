@@ -2409,10 +2409,9 @@ def cmd_version() -> None:
     that users with several copies (e.g. a versioned download alongside the
     `persoia` on their PATH) can tell exactly which file they are invoking.
     """
+    print(f"persoia {__version__}")
     if getattr(sys, "frozen", False):
-        print(f"persoia {__version__} ({Path(sys.executable).resolve()})")
-    else:
-        print(f"persoia {__version__}")
+        print(f"  exécutable : {Path(sys.executable).resolve()}")
 
 
 def cmd_help() -> None:
