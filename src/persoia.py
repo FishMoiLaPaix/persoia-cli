@@ -1114,16 +1114,21 @@ def _portal_base(config: dict) -> str:
     api_base = config.get("PERSOIA_API_BASE", "https://chat.persoia.com/v1")
     parsed = urllib.parse.urlparse(api_base)
     host = (parsed.hostname or "chat.persoia.com").lower()
-    if host.startswith("api."):
-        portal_host = "chat." + host[len("api."):]
-    elif host.startswith("chat.") or ".chat." in host:
-        portal_host = host
-    else:
+    # Only derive a portal from a TRUSTED persoia.com host (exact match or a
+    # .persoia.com subdomain). Otherwise fall back to the production portal.
+    # A substring check like ".chat. in host" would accept an attacker host
+    # such as "evil.chat.attacker.tld" and then echo it in the CORS
+    # Access-Control-Allow-Origin, letting a hostile portal drive the login.
+    if host != "persoia.com" and not host.endswith(".persoia.com"):
         portal_host = "chat.persoia.com"
+    elif host.startswith("api."):
+        portal_host = "chat." + host[len("api."):]
+    else:
+        portal_host = host
     return f"https://{portal_host}"
 
 
-def _valid_api_base(raw: str) -> str:
+def _valid_api_base(raw: str | None) -> str:
     """Return `raw` if it is a safe https persoia.com URL, else "".
 
     Strict validation (not a substring match): the hostname must be exactly
@@ -1200,6 +1205,12 @@ def _browser_login(config: dict, timeout: int = 180) -> dict | None:
             self.wfile.write(html.encode("utf-8"))
 
         def _accept(self, token: str, got_state: str, extra: dict) -> bool:
+            # Single-use: once a valid callback captured a token, ignore any
+            # further callback (race between done.set() and server.shutdown())
+            # so a second request cannot overwrite the result.
+            if result.get("token"):
+                self._page(200, "Connexion déjà reçue.")
+                return True
             # Constant-time state comparison to thwart timing oracles.
             if not got_state or not secrets.compare_digest(got_state, state):
                 self._page(400, "État invalide — connexion refusée.")

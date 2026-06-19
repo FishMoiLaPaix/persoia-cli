@@ -310,3 +310,26 @@ def test_callback_url_uses_ipv4_loopback(monkeypatch) -> None:
     assert result is not None
     assert captured["callback"].startswith("http://127.0.0.1:")
     assert "localhost" not in captured["callback"]
+
+
+class TestPortalBase:
+    """_portal_base must only ever derive a portal from a trusted persoia.com
+    host; a hostile PERSOIA_API_BASE must fall back to the production portal
+    (it is echoed in the CORS Access-Control-Allow-Origin)."""
+
+    @pytest.mark.parametrize(
+        "api_base,expected",
+        [
+            ("https://chat.persoia.com/v1", "https://chat.persoia.com"),
+            ("https://api.persoia.com/v1", "https://chat.persoia.com"),
+            ("https://demo.chat.persoia.com/v1", "https://demo.chat.persoia.com"),
+            ("https://api.demo.persoia.com/v1", "https://chat.demo.persoia.com"),
+            # Hostile / untrusted hosts -> production portal fallback.
+            ("https://evil.chat.attacker.tld/v1", "https://chat.persoia.com"),
+            ("https://chat.attacker.tld/v1", "https://chat.persoia.com"),
+            ("https://persoia.com.attacker.tld/v1", "https://chat.persoia.com"),
+            ("http://chat.persoia.com/v1", "https://chat.persoia.com"),
+        ],
+    )
+    def test_portal_base_only_trusts_persoia_com(self, api_base, expected):
+        assert persoia._portal_base({"PERSOIA_API_BASE": api_base}) == expected
