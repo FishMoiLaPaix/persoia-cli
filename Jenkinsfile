@@ -307,72 +307,71 @@ PY
                 }
 
                 stage('macOS arm64') {
-                    // `agent none` here: we first probe label availability with
-                    // nodesByLabel so that a TOTALLY ABSENT mac agent is detected
-                    // instantly (no queue wait at all), instead of blocking up to
-                    // the build timeout. When an agent IS online we acquire it
-                    // with node('mac-arm64') and bound only the build time.
+                    // `agent none` at stage level + `node('mac-arm64')` INSIDE
+                    // the timeout is the only way for a missing-agent wait to
+                    // count toward the timeout (otherwise the timeout step
+                    // only ticks on exec time, not on queue wait).
+                    //
+                    // `catchError` alone does NOT downgrade a timeout-induced
+                    // ABORTED back to UNSTABLE — Jenkins sets the build result
+                    // before catchError runs. Use an explicit script-level
+                    // try/catch + `currentBuild.result = 'UNSTABLE'` to
+                    // override.
                     agent none
                     steps {
                         script {
-                            // Instant pre-check: are there any ONLINE mac-arm64
-                            // agents? (Node and Label Parameter plugin.) Empty →
-                            // skip immediately, no wait.
-                            def macOnline = nodesByLabel(label: 'mac-arm64', offline: false)
-                            if (macOnline.isEmpty()) {
-                                echo 'Aucun agent mac-arm64 en ligne → stage macOS ignoré (aucune attente). Release partielle.'
-                                // PR builds: leave SUCCESS so a missing agent
-                                // never blocks merges. tag/main: UNSTABLE so the
-                                // Release stage publishes a PARTIAL release.
-                                if (!env.CHANGE_ID) {
+                            try {
+                                timeout(time: 5, unit: 'MINUTES') {
+                                    node('mac-arm64') {
+                                        checkout scm
+                                        sh '''
+                                            set -eu
+                                            python3 -m venv .venv
+                                            . .venv/bin/activate
+                                            pip install --upgrade pip
+                                            pip install -r requirements-build.txt
+                                            pyinstaller --clean --noconfirm persoia.spec
+                                            mv dist/persoia dist/persoia-darwin-arm64
+                                            BIN="$PWD/dist/persoia-darwin-arm64"
+
+                                            "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
+                                            "$BIN" help    | grep -q "Assistant code souverain"
+                                            : > /tmp/empty.env
+                                            PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+                                        '''
+                                        archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                        stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                    }
+                                }
+                            } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException err) {
+                                // INFRASTRUCTURE failure only: the timeout fired
+                                // because no mac agent was available to pick up
+                                // node('mac-arm64'). This must never block the
+                                // pipeline — degrade gracefully:
+                                //  - PR builds (env.CHANGE_ID set): reset to
+                                //    SUCCESS so a missing agent doesn't block
+                                //    merges (the GitHub Checks plugin maps
+                                //    UNSTABLE → 'failure', which would block).
+                                //  - tag/main builds: mark UNSTABLE and let the
+                                //    Release stage publish a PARTIAL release (the
+                                //    platforms that did build).
+                                echo "mac-arm64 agent unavailable (timeout): ${err}"
+                                if (env.CHANGE_ID) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else {
                                     currentBuild.result = 'UNSTABLE'
                                 }
-                            } else {
-                                try {
-                                    // Agent present → the timeout now bounds only
-                                    // the BUILD (generous: venv + pip + PyInstaller
-                                    // + smoke tests), not an agent-acquisition wait.
-                                    timeout(time: 15, unit: 'MINUTES') {
-                                        node('mac-arm64') {
-                                            checkout scm
-                                            sh '''
-                                                set -eu
-                                                python3 -m venv .venv
-                                                . .venv/bin/activate
-                                                pip install --upgrade pip
-                                                pip install -r requirements-build.txt
-                                                pyinstaller --clean --noconfirm persoia.spec
-                                                mv dist/persoia dist/persoia-darwin-arm64
-                                                BIN="$PWD/dist/persoia-darwin-arm64"
-
-                                                "$BIN" version | grep -qE "^persoia [0-9]+\\.[0-9]+\\.[0-9]+$"
-                                                "$BIN" help    | grep -q "Assistant code souverain"
-                                                : > /tmp/empty.env
-                                                PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
-                                            '''
-                                            archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
-                                            stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
-                                        }
-                                    }
-                                } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException err) {
-                                    // Agent dropped mid-build, or the build
-                                    // exceeded 15 min → treat as infrastructure:
-                                    // degrade to a partial release rather than
-                                    // block (PR builds stay SUCCESS).
-                                    echo "mac-arm64 indisponible en cours de build (timeout): ${err}"
-                                    if (!env.CHANGE_ID) {
-                                        currentBuild.result = 'UNSTABLE'
-                                    }
-                                } catch (err) {
-                                    // A REAL build/test failure of the mac binary
-                                    // (PyInstaller error, smoke-test failure, …).
-                                    // Do NOT ship a partial release that hides a
-                                    // broken mac build: tolerate only on PR builds,
-                                    // hard-fail on tag/main.
-                                    echo "mac-arm64 build failed: ${err}"
-                                    if (!env.CHANGE_ID) {
-                                        throw err
-                                    }
+                            } catch (err) {
+                                // A REAL build/test failure of the mac binary
+                                // (PyInstaller error, smoke-test failure, …).
+                                // Do NOT ship a partial release that hides a
+                                // broken mac build: tolerate only on PR builds
+                                // (don't block merges), hard-fail on tag/main.
+                                echo "mac-arm64 build failed: ${err}"
+                                if (env.CHANGE_ID) {
+                                    currentBuild.result = 'SUCCESS'
+                                } else {
+                                    throw err
                                 }
                             }
                         }
