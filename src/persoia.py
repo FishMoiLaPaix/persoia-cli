@@ -38,7 +38,7 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 
 def collect_persoia_md_files() -> list[Path]:
