@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Définition productbuild pour l'installateur PersoIA CLI.
+  Référence le composant produit par pkgbuild (persoia-component.pkg).
+-->
+<installer-gui-script minSpecVersion="1">
+    <title>PersoIA CLI</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <!-- /usr/local/bin nécessite les droits administrateur : l'installateur
+         demande le mot de passe. -->
+    <domains enable_localSystem="true"/>
+
+    <pkg-ref id="com.persoia.cli"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.persoia.cli"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.persoia.cli" visible="false">
+        <pkg-ref id="com.persoia.cli"/>
+    </choice>
+    <pkg-ref id="com.persoia.cli">persoia-component.pkg</pkg-ref>
+</installer-gui-script>

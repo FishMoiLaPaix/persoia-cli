@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Installateur MSI PersoIA CLI (WiX v3) — réf. ia-perso#392.
+
+  Install PER-UTILISATEUR (pas d'élévation UAC ; PATH user > machine, comme
+  demandé dans #392 pour des utilisateurs non-développeurs) sous
+  %LOCALAPPDATA%\PersoIA, avec :
+    - un assistant standard Windows permettant de CHOISIR le dossier
+      d'installation (WixUI_InstallDir) ;
+    - l'ajout automatique de ce dossier au PATH utilisateur ;
+    - une étape finale optionnelle lançant « persoia login » pour guider la
+      création / saisie de la clé API via le portail web.
+
+  L'architecture est gérée par une condition 64 bits : le binaire x64 couvre
+  Windows x64 (natif) et Windows ARM64 (émulation x64). Une installation sur un
+  Windows 32 bits est bloquée avec un message clair.
+
+  Variables passées par build-msi.ps1 via -d :
+    var.Version    version produit numérique (ex. 0.6.0 — suffixe -rcN retiré)
+    var.ExePath    chemin du persoia.exe à empaqueter
+    var.IconPath   chemin de persoia.ico
+    var.LicenseRtf chemin du RTF de licence
+
+  UpgradeCode est FIXE et ne doit jamais changer : c'est lui qui permet aux
+  futures versions de remplacer proprement l'install existante (MajorUpgrade),
+  garantissant un seul « persoia » canonique sur le PATH (cf. #818).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="PersoIA CLI"
+           Language="1036"
+           Codepage="1252"
+           Version="$(var.Version)"
+           Manufacturer="FishMoiLaPaix SAS"
+           UpgradeCode="4F8C2A1E-3B7D-4E9A-9C16-5D2E8F0A7B34">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             Description="PersoIA CLI — assistant code souverain"
+             Manufacturer="FishMoiLaPaix SAS"
+             Languages="1036"
+             SummaryCodepage="1252" />
+
+    <!-- Architecture : exige un Windows 64 bits (x64 natif, ou ARM64 via
+         l'émulation x64). Bloque proprement les Windows 32 bits. -->
+    <Condition Message="PersoIA CLI nécessite une version 64 bits de Windows (x64 ou ARM64).">
+      <![CDATA[VersionNT64]]>
+    </Condition>
+
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="Une version plus récente de PersoIA CLI est déjà installée." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Dossier par défaut %LOCALAPPDATA%\PersoIA, modifiable dans l'assistant. -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLDIR" Name="PersoIA">
+
+          <Component Id="PersoiaExe" Guid="7E2D1C9A-4F6B-4D83-A1E5-9B0C3D7F2A41">
+            <!-- Pour un install per-utilisateur, la KeyPath doit être une clé
+                 HKCU (règle ICE38), pas le fichier. -->
+            <RegistryValue Root="HKCU"
+                           Key="Software\PersoIA\CLI"
+                           Name="installed"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+
+            <File Id="persoiaExe"
+                  Name="persoia.exe"
+                  Source="$(var.ExePath)" />
+
+            <!-- Ajout au PATH utilisateur ; retiré à la désinstallation
+                 (Permanent="no"). Part="last" → append en fin de PATH. -->
+            <Environment Id="PersoiaPath"
+                         Name="PATH"
+                         Value="[INSTALLDIR]"
+                         Permanent="no"
+                         Part="last"
+                         Action="set"
+                         System="no" />
+
+            <!-- Nettoie le dossier d'install à la désinstallation (règle ICE64
+                 pour un répertoire du profil utilisateur). -->
+            <RemoveFolder Id="RemoveInstallDir" On="uninstall" />
+          </Component>
+
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="PersoIA CLI" Level="1">
+      <ComponentRef Id="PersoiaExe" />
+    </Feature>
+
+    <!-- Icône dans "Applications et fonctionnalités" -->
+    <Icon Id="persoia.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="persoia.ico" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/FishMoiLaPaix/persoia-cli" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.persoia.com" />
+
+    <!-- Assistant standard avec choix du dossier d'installation. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+
+    <!-- Étape finale : case à cocher (cochée par défaut) qui lance
+         « persoia login » dans un terminal pour guider la création / saisie de
+         la clé API (réf. #392). Ouvre cmd /k afin que l'utilisateur voie le
+         déroulé et que la fenêtre reste ouverte. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+              Value="Configurer PersoIA maintenant (connexion et clé API)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <CustomAction Id="LaunchPersoiaLogin"
+                  Directory="INSTALLDIR"
+                  ExeCommand="&quot;[System64Folder]cmd.exe&quot; /k &quot;[INSTALLDIR]persoia.exe&quot; login"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="LaunchPersoiaLogin">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+    </UI>
+  </Product>
+</Wix>

@@ -300,9 +300,25 @@ PY
                             grep -q "PERSOIA_API_KEY=persoia_demo_sk_mock_login_ci" /tmp/login.env
                             grep -q "PERSOIA_TENANT_NAME=Mock Tenant" /tmp/login.env
                             PERSOIA_CONFIG=/tmp/login.env "$BIN" config | grep -q "Clé API:"
+
+                            # --- Paquets .deb / .rpm via nfpm ---
+                            # nfpm est un binaire unique tiré dans le workspace
+                            # (même pattern « pull portable tool » que CPython).
+                            VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
+                            NFPM_VERSION=2.41.1
+                            curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+                                | tar xz -C /tmp nfpm
+                            VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
+                            VERSION="$VER" /tmp/nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/
+                            # Smoke : le .deb annonce la bonne version, les fichiers existent.
+                            # nfpm inclut la révision (-1) dans le nom du .deb.
+                            dpkg-deb -f "dist/persoia_${VER}-1_amd64.deb" Version | grep -q "$VER"
+                            ls dist/*.rpm >/dev/null
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-linux-x64', fingerprint: true
+                        archiveArtifacts artifacts: 'dist/*.deb, dist/*.rpm', fingerprint: true
                         stash name: 'binary-linux-x64', includes: 'dist/persoia-linux-x64'
+                        stash name: 'installer-linux', includes: 'dist/*.deb, dist/*.rpm'
                     }
                 }
 
@@ -371,9 +387,16 @@ PY
                                                 "$BIN" help    | grep -q "Assistant code souverain"
                                                 : > /tmp/empty.env
                                                 PERSOIA_CONFIG=/tmp/empty.env "$BIN" config | grep -q "Non connecté"
+
+                                                # --- Installateur .pkg (outils natifs macOS) ---
+                                                VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
+                                                bash packaging/macos/build-pkg.sh "$PWD/dist/persoia-darwin-arm64" "$VER"
+                                                test -f "dist/persoia-${VER}-arm64.pkg"
                                             '''
                                             archiveArtifacts artifacts: 'dist/persoia-darwin-arm64', fingerprint: true
+                                            archiveArtifacts artifacts: 'dist/*-arm64.pkg', fingerprint: true
                                             stash name: 'binary-darwin-arm64', includes: 'dist/persoia-darwin-arm64'
+                                            stash name: 'installer-macos', includes: 'dist/*-arm64.pkg'
                                         }
                                     }
                                 } catch (err) {
@@ -437,9 +460,17 @@ PY
                             type NUL > %TEMP%\\empty.env
                             set PERSOIA_CONFIG=%TEMP%\\empty.env
                             %BIN% config  | findstr /C:"Non connect" >nul || exit /b 1
+
+                            REM --- Installateur MSI (WiX v3 portable) ---
+                            REM build-msi.ps1 extrait la version de src\\persoia.py et
+                            REM tire les binaires WiX dans .wix\\ si absents. Sortie :
+                            REM dist\\persoia-<ver>-x64.msi
+                            powershell -NoProfile -ExecutionPolicy Bypass -File packaging\\windows\\build-msi.ps1 -ExePath "%CD%\\dist\\persoia-windows-x64.exe" || exit /b 1
                         '''
                         archiveArtifacts artifacts: 'dist/persoia-windows-x64.exe', fingerprint: true
+                        archiveArtifacts artifacts: 'dist/*-x64.msi', fingerprint: true
                         stash name: 'binary-windows-x64', includes: 'dist/persoia-windows-x64.exe'
+                        stash name: 'installer-windows', includes: 'dist/*-x64.msi'
                     }
                 }
             }
@@ -456,16 +487,18 @@ PY
                     // agent offline) so a PARTIAL release can still publish the
                     // platforms that built. unstash throws when a stash is
                     // absent — collect the ones that succeed and pass the set
-                    // to the upload step via env flags.
+                    // to the upload step via env flags. L'installateur de chaque
+                    // plateforme est unstashé avec son binaire (même provenance).
                     def stashes = [
-                        'linux'  : 'binary-linux-x64',
-                        'darwin' : 'binary-darwin-arm64',
-                        'windows': 'binary-windows-x64',
+                        'linux'  : ['binary-linux-x64',    'installer-linux'],
+                        'darwin' : ['binary-darwin-arm64', 'installer-macos'],
+                        'windows': ['binary-windows-x64',  'installer-windows'],
                     ]
                     def present = []
-                    stashes.each { platform, stashName ->
+                    stashes.each { platform, names ->
                         try {
-                            unstash stashName
+                            unstash names[0]
+                            unstash names[1]
                             present.add(platform)
                         } catch (err) {
                             // Tolerate ONLY a genuinely absent stash (the
@@ -474,7 +507,7 @@ PY
                             // problem) must NOT be silently turned into a
                             // partial release — rethrow it.
                             if (err.getMessage()?.contains('No such saved stash')) {
-                                echo "⚠️  ${stashName} indisponible (stage non exécuté ?) — exclu de la release partielle"
+                                echo "⚠️  ${platform} indisponible (stage non exécuté ?) — exclu de la release partielle"
                             } else {
                                 throw err
                             }
@@ -519,24 +552,43 @@ PY
                         #    symlinks, so both copies are uploaded (identical
                         #    content → identical SHA-256).
                         VER="${RELEASE_TAG#v}"
+                        # Les installateurs sont nommés d'après __version__ (la
+                        # version NUMÉRIQUE embarquée, sans suffixe -rcN), tandis
+                        # que les binaires portent le tag complet. Sur un tag de
+                        # pré-version (v1.2.3-rc1), VER contient -rc1 mais les
+                        # installateurs s'appellent persoia-1.2.3-* → on dérive
+                        # PKG_VER pour eux (cohérent avec les stages de build).
+                        PKG_VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
                         # Only publish the platforms that built (partial release
                         # tolerated — e.g. macOS agent offline). Each present
                         # binary is uploaded under two names: versionless (the
                         # stable "latest" alias used by `persoia update` and the
                         # README curl) and versioned (persoia-<ver>-<platform>).
+                        # Only publish the platforms that built (partial release
+                        # tolerated). Chaque plateforme présente ajoute son binaire
+                        # ET son/ses installateur(s), chacun sous deux noms :
+                        # versionné + alias sans version (lien "latest" du README).
                         ( cd dist
                           UPLOADS=""
                           if [ "${RELEASE_HAS_LINUX}" = "true" ]; then
                             cp persoia-linux-x64 "persoia-${VER}-linux-x64"
+                            cp "persoia_${PKG_VER}-1_amd64.deb"  persoia-amd64.deb
+                            cp "persoia-${PKG_VER}-1.x86_64.rpm" persoia-x86_64.rpm
                             UPLOADS="$UPLOADS persoia-linux-x64 persoia-${VER}-linux-x64"
+                            UPLOADS="$UPLOADS persoia_${PKG_VER}-1_amd64.deb persoia-amd64.deb"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-1.x86_64.rpm persoia-x86_64.rpm"
                           fi
                           if [ "${RELEASE_HAS_DARWIN}" = "true" ]; then
                             cp persoia-darwin-arm64 "persoia-${VER}-darwin-arm64"
+                            cp "persoia-${PKG_VER}-arm64.pkg" persoia-arm64.pkg
                             UPLOADS="$UPLOADS persoia-darwin-arm64 persoia-${VER}-darwin-arm64"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-arm64.pkg persoia-arm64.pkg"
                           fi
                           if [ "${RELEASE_HAS_WINDOWS}" = "true" ]; then
                             cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
+                            cp "persoia-${PKG_VER}-x64.msi" persoia-x64.msi
                             UPLOADS="$UPLOADS persoia-windows-x64.exe persoia-${VER}-windows-x64.exe"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-x64.msi persoia-x64.msi"
                           fi
                           # Per-asset <name>.sha256 sidecars: `persoia update`
                           # reads these FIRST (then falls back to SHA256SUMS).
@@ -557,6 +609,16 @@ PY
                             --repo FishMoiLaPaix/persoia-cli \
                             --clobber \
                             $UPLOADS $SIDECARS SHA256SUMS )
+
+                        # Formula Homebrew : nécessite les empreintes darwin ET
+                        # linux (toutes deux dans SHA256SUMS). Skip propre si l'une
+                        # manque (release partielle) ou si le tap n'existe pas
+                        # encore. gh est sur le PATH, GH_TOKEN exporté.
+                        if [ "${RELEASE_HAS_DARWIN}" = "true" ] && [ "${RELEASE_HAS_LINUX}" = "true" ]; then
+                            VERSION="$VER" bash packaging/homebrew/render-formula.sh dist/SHA256SUMS
+                        else
+                            echo "Formula Homebrew non mise à jour (release partielle : darwin + linux requis)."
+                        fi
                     '''
                 }
             }

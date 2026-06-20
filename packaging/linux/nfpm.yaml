@@ -1,0 +1,38 @@
+# Configuration nfpm (https://nfpm.goreleaser.com) pour produire les paquets
+# .deb et .rpm de PersoIA CLI à partir du binaire Linux déjà buildé.
+#
+# La version est injectée via la variable d'environnement VERSION :
+#   VERSION=0.6.0 nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
+#   VERSION=0.6.0 nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target dist/
+#
+# Le binaire est installé dans /usr/bin/persoia (sur le PATH par défaut, géré
+# par apt/dnf). Paquet non signé : voir README pour l'installation.
+name: persoia
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: none
+release: "1"
+section: utils
+priority: optional
+maintainer: FishMoiLaPaix SAS <contact@persoia.com>
+description: |
+  PersoIA CLI — assistant code souverain.
+  Wrapper CLI pour PersoIA : utilisez votre instance GPU privée depuis le
+  terminal, en mode chat ou code (intégration aider).
+vendor: FishMoiLaPaix SAS
+homepage: https://www.persoia.com
+license: MIT
+
+contents:
+  - src: ./dist/persoia-linux-x64
+    dst: /usr/bin/persoia
+    file_info:
+      mode: 0755
+
+# Noms de sortie (la révision -1 est incluse) : persoia_<ver>-1_amd64.deb et
+# persoia-<ver>-1.x86_64.rpm.
+deb:
+  compression: xz
+rpm:
+  compression: xz

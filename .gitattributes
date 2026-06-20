@@ -1,0 +1,6 @@
+# Fins de ligne explicites pour les scripts de packaging.
+# Les scripts batch Windows sont plus fiables en CRLF ; les scripts shell
+# doivent rester en LF (sinon `bash` casse sur le \r).
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh  text eol=lf
