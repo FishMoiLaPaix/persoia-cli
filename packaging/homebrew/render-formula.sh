@@ -37,11 +37,21 @@ sha_for() {
 SHA_DARWIN="$(sha_for "persoia-${VERSION}-darwin-arm64")"
 SHA_LINUX="$(sha_for "persoia-${VERSION}-linux-x64")"
 
-# --- Tap absent → skip propre ------------------------------------------------
-if ! gh repo view "$TAP_REPO" >/dev/null 2>&1; then
-    echo "Tap $TAP_REPO inexistant — étape Homebrew ignorée."
-    echo "Créez-le une fois : gh repo create $TAP_REPO --public"
-    exit 0
+# --- Tap absent → skip propre ; autres erreurs → fail bruyant ----------------
+# On capture stderr (stdout jeté) pour différencier un tap réellement absent
+# (404) d'un problème d'auth/jeton/réseau qu'il ne faut PAS masquer.
+if ! err="$(gh repo view "$TAP_REPO" 2>&1 1>/dev/null)"; then
+    case "$err" in
+        *"Could not resolve"*|*"404"*|*"Not Found"*)
+            echo "Tap $TAP_REPO inexistant — étape Homebrew ignorée."
+            echo "Créez-le une fois : gh repo create $TAP_REPO --public"
+            exit 0
+            ;;
+        *)
+            echo "ERREUR : accès au tap $TAP_REPO impossible (auth/réseau ?) : $err" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 # --- Rendu -------------------------------------------------------------------

@@ -30,17 +30,41 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- PATH utilisateur : lire le scope User dans le registre, puis setx ------
-REM (setx ecrit dans le scope utilisateur ; limite ~1024 caracteres.)
+REM --- Verification d'integrite (sidecar .sha256 publie avec la release) ------
+REM Empeche l'execution d'un binaire altere. Avertit si le sidecar manque.
+set "SHAFILE=%TEMP%\persoia.exe.sha256"
+set "EXPECTED="
+set "ACTUAL="
+curl -fsSL "%URL%.sha256" -o "%SHAFILE%" 2>nul
+if exist "%SHAFILE%" (
+    set /p EXPECTED=<"%SHAFILE%"
+    for /f "skip=1 delims=" %%H in ('certutil -hashfile "%TARGET%" SHA256') do if not defined ACTUAL set "ACTUAL=%%H"
+    set "ACTUAL=!ACTUAL: =!"
+    if /I not "!ACTUAL!"=="!EXPECTED!" (
+        echo Empreinte du binaire invalide : attendue !EXPECTED!, obtenue !ACTUAL!.
+        del "%TARGET%" 2>nul
+        del "%SHAFILE%" 2>nul
+        exit /b 1
+    )
+    del "%SHAFILE%" 2>nul
+    echo Integrite verifiee ^(SHA-256^).
+) else (
+    echo Empreinte SHA-256 indisponible pour cette release -- integrite non verifiee.
+)
+
+REM --- PATH utilisateur : lire le scope User dans le registre, puis l'ecrire --
+REM On utilise `reg add` (REG_EXPAND_SZ) plutot que `setx`, qui tronque
+REM silencieusement les PATH > 1024 caracteres. Un nouveau terminal relit le
+REM registre, donc la modif est prise en compte (cf. message de fin).
 set "USERPATH="
 for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v PATH 2^>nul') do set "USERPATH=%%B"
 
-echo %USERPATH% | find /I "%INSTALLDIR%" >nul
+echo !USERPATH! | find /I "%INSTALLDIR%" >nul
 if errorlevel 1 (
     if defined USERPATH (
-        setx PATH "%USERPATH%;%INSTALLDIR%" >nul
+        reg add "HKCU\Environment" /v PATH /t REG_EXPAND_SZ /d "!USERPATH!;%INSTALLDIR%" /f >nul
     ) else (
-        setx PATH "%INSTALLDIR%" >nul
+        reg add "HKCU\Environment" /v PATH /t REG_EXPAND_SZ /d "%INSTALLDIR%" /f >nul
     )
     echo PATH utilisateur mis a jour.
 ) else (

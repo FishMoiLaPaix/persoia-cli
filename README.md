@@ -27,11 +27,14 @@ pour configurer votre **clé API**.
 > SmartScreen affiche « Windows a protégé votre ordinateur » → cliquez
 > **Informations complémentaires** puis **Exécuter quand même**.
 
-> Sans MSI (environnement verrouillé), une alternative en une ligne :
-> ```powershell
-> irm https://raw.githubusercontent.com/FishMoiLaPaix/persoia-cli/main/packaging/windows/install.ps1 | iex
-> ```
-> (équivalent CMD : `packaging/windows/install.cmd`).
+Sans MSI (environnement verrouillé), une alternative en une ligne (le script
+vérifie l'empreinte SHA-256 du binaire téléchargé) :
+
+```powershell
+irm https://raw.githubusercontent.com/FishMoiLaPaix/persoia-cli/main/packaging/windows/install.ps1 | iex
+```
+
+(équivalent CMD : `packaging/windows/install.cmd`)
 
 ### macOS (Apple Silicon)
 

@@ -77,10 +77,19 @@ $Light      = Join-Path $WixDir 'light.exe'
 
 if (-not (Test-Path $Candle)) {
     $WixZipUrl = 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip'
-    $WixZip    = Join-Path $RepoRoot 'wix314-binaries.zip'
+    # Empreinte épinglée du zip wix314-binaries.zip (wix3141rtm) : on exécute
+    # candle.exe/light.exe depuis cette archive, donc on vérifie son intégrité
+    # avant extraction pour fermer un vecteur d'exécution (archive falsifiée).
+    $WixZipSha256 = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+    $WixZip       = Join-Path $RepoRoot 'wix314-binaries.zip'
     Write-Host "Téléchargement de WiX $WixVersion..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $WixZipUrl -OutFile $WixZip
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $WixZip).Hash
+    if ($actual -ne $WixZipSha256) {
+        Remove-Item $WixZip -Force
+        throw "Empreinte WiX invalide : attendue $WixZipSha256, obtenue $actual"
+    }
     if (Test-Path $WixDir) { Remove-Item -Recurse -Force $WixDir }
     Expand-Archive -Path $WixZip -DestinationPath $WixDir -Force
     Remove-Item $WixZip -Force

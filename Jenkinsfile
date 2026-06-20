@@ -552,6 +552,13 @@ PY
                         #    symlinks, so both copies are uploaded (identical
                         #    content → identical SHA-256).
                         VER="${RELEASE_TAG#v}"
+                        # Les installateurs sont nommés d'après __version__ (la
+                        # version NUMÉRIQUE embarquée, sans suffixe -rcN), tandis
+                        # que les binaires portent le tag complet. Sur un tag de
+                        # pré-version (v1.2.3-rc1), VER contient -rc1 mais les
+                        # installateurs s'appellent persoia-1.2.3-* → on dérive
+                        # PKG_VER pour eux (cohérent avec les stages de build).
+                        PKG_VER=$(grep -E "^__version__" src/persoia.py | cut -d'"' -f2)
                         # Only publish the platforms that built (partial release
                         # tolerated — e.g. macOS agent offline). Each present
                         # binary is uploaded under two names: versionless (the
@@ -565,23 +572,23 @@ PY
                           UPLOADS=""
                           if [ "${RELEASE_HAS_LINUX}" = "true" ]; then
                             cp persoia-linux-x64 "persoia-${VER}-linux-x64"
-                            cp "persoia_${VER}-1_amd64.deb"  persoia-amd64.deb
-                            cp "persoia-${VER}-1.x86_64.rpm" persoia-x86_64.rpm
+                            cp "persoia_${PKG_VER}-1_amd64.deb"  persoia-amd64.deb
+                            cp "persoia-${PKG_VER}-1.x86_64.rpm" persoia-x86_64.rpm
                             UPLOADS="$UPLOADS persoia-linux-x64 persoia-${VER}-linux-x64"
-                            UPLOADS="$UPLOADS persoia_${VER}-1_amd64.deb persoia-amd64.deb"
-                            UPLOADS="$UPLOADS persoia-${VER}-1.x86_64.rpm persoia-x86_64.rpm"
+                            UPLOADS="$UPLOADS persoia_${PKG_VER}-1_amd64.deb persoia-amd64.deb"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-1.x86_64.rpm persoia-x86_64.rpm"
                           fi
                           if [ "${RELEASE_HAS_DARWIN}" = "true" ]; then
                             cp persoia-darwin-arm64 "persoia-${VER}-darwin-arm64"
-                            cp "persoia-${VER}-arm64.pkg" persoia-arm64.pkg
+                            cp "persoia-${PKG_VER}-arm64.pkg" persoia-arm64.pkg
                             UPLOADS="$UPLOADS persoia-darwin-arm64 persoia-${VER}-darwin-arm64"
-                            UPLOADS="$UPLOADS persoia-${VER}-arm64.pkg persoia-arm64.pkg"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-arm64.pkg persoia-arm64.pkg"
                           fi
                           if [ "${RELEASE_HAS_WINDOWS}" = "true" ]; then
                             cp persoia-windows-x64.exe "persoia-${VER}-windows-x64.exe"
-                            cp "persoia-${VER}-x64.msi" persoia-x64.msi
+                            cp "persoia-${PKG_VER}-x64.msi" persoia-x64.msi
                             UPLOADS="$UPLOADS persoia-windows-x64.exe persoia-${VER}-windows-x64.exe"
-                            UPLOADS="$UPLOADS persoia-${VER}-x64.msi persoia-x64.msi"
+                            UPLOADS="$UPLOADS persoia-${PKG_VER}-x64.msi persoia-x64.msi"
                           fi
                           # Per-asset <name>.sha256 sidecars: `persoia update`
                           # reads these FIRST (then falls back to SHA256SUMS).

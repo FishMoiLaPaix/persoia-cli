@@ -20,7 +20,7 @@ La version est partout dérivée de la source de vérité `__version__`
 > consigne « PATH user > machine » de l'issue, pour des utilisateurs
 > non-développeurs. Un seul `persoia` canonique sur le PATH → règle le bug de
 > versions multiples (#818).
-
+>
 > **Non signés.** Aucun certificat de signature pour l'instant → SmartScreen
 > (Windows) / Gatekeeper (macOS) avertissent. Contournements documentés dans le
 > README racine. La signature pourra être ajoutée plus tard sans changer la

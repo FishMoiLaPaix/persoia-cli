@@ -40,6 +40,23 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri $url -OutFile $target
 
+# --- Vérification d'intégrité (sidecar .sha256 publié avec la release) -------
+# Empêche l'exécution d'un binaire altéré (réseau/artefact compromis).
+$expected = $null
+try {
+    $expected = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content.Trim().Split()[0]
+} catch {
+    Write-Warning "Empreinte SHA-256 indisponible pour cette release — intégrité non vérifiée."
+}
+if ($expected) {
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $target).Hash
+    if ($actual -ne $expected) {   # -ne est insensible à la casse
+        Remove-Item $target -Force
+        throw "Empreinte du binaire invalide : attendue $expected, obtenue $actual. Installation annulée."
+    }
+    Write-Host "Intégrité vérifiée (SHA-256)."
+}
+
 # --- PATH utilisateur (scope User, pas le PATH fusionné) --------------------
 $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
 if (($userPath -split ';') -notcontains $installDir) {
