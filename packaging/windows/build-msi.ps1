@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Construit l'installateur MSI de PersoIA CLI avec WiX v3 (portable).
 
