@@ -5,7 +5,7 @@ The model is determined by the tenant's subscription and fetched
 from the API at startup. The user only needs an API key.
 
 Usage:
-    persoia login [--no-browser] [--email EMAIL --password PASSWORD]
+    persoia login [--no-browser] [--force] [--email EMAIL --password PASSWORD]
     persoia logout
     persoia init
     persoia code [FILES...] [-y/--yes] [--no-discover] [aider args...]
@@ -1319,12 +1319,16 @@ def cmd_login(args: list[str]) -> None:
     no_browser = False
     email = ""
     password = ""
+    force = False
 
     # Parse flags
     i = 0
     while i < len(args):
         if args[i] == "--no-browser":
             no_browser = True
+            i += 1
+        elif args[i] == "--force":
+            force = True
             i += 1
         elif args[i] == "--email" and i + 1 < len(args):
             email = args[i + 1]
@@ -1337,6 +1341,37 @@ def cmd_login(args: list[str]) -> None:
             sys.exit(1)
 
     config = load_config()
+
+    # Login idempotent (persoia-cli#26) : si une session valide existe déjà, ne
+    # PAS relancer le flow (qui minterait une nouvelle clé). C'était la cause
+    # principale de la rafale de tokens : chaque `persoia login` — même après un
+    # échec d'envoi loopback — créait une clé de plus. On valide la clé stockée
+    # par un appel léger (GET /models) pour détecter un token révoqué/expiré, et
+    # on s'arrête si elle est encore bonne. `--force` court-circuite ce contrôle.
+    existing_key = config.get("PERSOIA_API_KEY", "")
+    if not force and existing_key:
+        # fatal=False : si l'API est injoignable, ne PAS quitter (api_request
+        # ferait sys.exit) — on renvoie status=None et on poursuit vers la
+        # connexion normale plutôt que de bloquer `persoia login`.
+        status, _ = api_request(
+            f"{config['PERSOIA_API_BASE']}/models", api_key=existing_key, fatal=False
+        )
+        if status == 200:
+            masked = (
+                existing_key[:12] + "…" + existing_key[-4:]
+                if len(existing_key) > 20
+                else existing_key
+            )
+            print("Déjà connecté.")
+            if config.get("PERSOIA_TENANT_NAME"):
+                print(f"  Entreprise : {config['PERSOIA_TENANT_NAME']}")
+            print(f"  Clé        : {masked}")
+            print()
+            print("Pour vous reconnecter (nouvelle clé) : 'persoia login --force'")
+            print("Pour vous déconnecter                : 'persoia logout'")
+            return
+        # Clé présente mais invalide (révoquée/expirée) → on poursuit vers une
+        # nouvelle connexion ci-dessous.
 
     # Browser-based login is the default: the user authenticates on the web
     # portal (which verifies their rights and resolves the tenant) and the CLI
@@ -2431,7 +2466,8 @@ def cmd_help() -> None:
     print("""PersoIA CLI — Assistant code souverain
 
 Usage:
-  persoia login [--no-browser]     Connexion via le navigateur (par défaut) :
+  persoia login [--no-browser] [--force]
+                                   Connexion via le navigateur (par défaut) :
                                    ouvre chat.persoia.com, vous vous connectez
                                    sur le site, et le token CLI est récupéré
                                    automatiquement via un rappel local sur
@@ -2439,6 +2475,9 @@ Usage:
                                    pas 'localhost', qui peut pointer sur ::1).
                                    --no-browser bascule sur la connexion
                                    email / mot de passe (headless/SSH).
+                                   Si vous êtes déjà connecté, login s'arrête
+                                   sans recréer de clé ; --force pour forcer une
+                                   nouvelle connexion (et une nouvelle clé).
   persoia logout                   Déconnexion (supprime la clé API locale)
   persoia init                     Génère un fichier PERSOIA.md pour le projet
   persoia code [FILES...] [-y/--yes] [--no-discover] [AIDER_ARGS...]
