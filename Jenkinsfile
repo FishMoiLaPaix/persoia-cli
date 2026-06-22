@@ -524,7 +524,12 @@ PY
                     env.RELEASE_HAS_DARWIN  = present.contains('darwin')  ? 'true' : 'false'
                     env.RELEASE_HAS_WINDOWS = present.contains('windows') ? 'true' : 'false'
                 }
-                withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
+                // github-app-release: GitHub App (persoia-ci-release) installation
+                // token with Contents:write on persoia-cli + homebrew-tap. The PAT
+                // behind 'github-token' is GHCR-only (write:packages) and can do
+                // neither `gh release` nor the homebrew-tap `git push`. Consumed as
+                // usernamePassword; the password IS the ephemeral install token.
+                withCredentials([usernamePassword(credentialsId: 'github-app-release', usernameVariable: 'GH_APP_USER', passwordVariable: 'GH_TOKEN')]) {
                     sh '''
                         set -eu
                         # Release stage doesn't need PyInstaller, just gh CLI to
