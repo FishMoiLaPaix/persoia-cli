@@ -416,3 +416,23 @@ def test_login_proceeds_when_existing_token_invalid(monkeypatch) -> None:
     persoia.cmd_login([])
 
     assert called["browser"] is True, "un token révoqué/expiré doit relancer une connexion"
+
+
+def test_login_proceeds_when_api_unreachable(monkeypatch) -> None:
+    # API injoignable : la sonde NON-FATALE (fatal=False) renvoie (None, None)
+    # → pas de raccourci « déjà connecté », pas de sys.exit, on poursuit vers
+    # la connexion normale (review Copilot cli#27).
+    monkeypatch.setattr(persoia, "load_config", _config_with_valid_key)
+    monkeypatch.setattr(persoia, "api_request", lambda *a, **k: (None, None))
+    monkeypatch.setattr(persoia, "save_config", lambda v: None)
+    called = {"browser": False}
+
+    def fake_browser(cfg: dict) -> dict:
+        called["browser"] = True
+        return {"token": "persoia_sk_fresh", "api_base": cfg["PERSOIA_API_BASE"]}
+
+    monkeypatch.setattr(persoia, "_browser_login", fake_browser)
+
+    persoia.cmd_login([])
+
+    assert called["browser"] is True, "API injoignable ne doit pas bloquer login (fatal=False)"

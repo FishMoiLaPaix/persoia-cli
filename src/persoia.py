@@ -1350,7 +1350,12 @@ def cmd_login(args: list[str]) -> None:
     # on s'arrête si elle est encore bonne. `--force` court-circuite ce contrôle.
     existing_key = config.get("PERSOIA_API_KEY", "")
     if not force and existing_key:
-        status, _ = api_request(f"{config['PERSOIA_API_BASE']}/models", api_key=existing_key)
+        # fatal=False : si l'API est injoignable, ne PAS quitter (api_request
+        # ferait sys.exit) — on renvoie status=None et on poursuit vers la
+        # connexion normale plutôt que de bloquer `persoia login`.
+        status, _ = api_request(
+            f"{config['PERSOIA_API_BASE']}/models", api_key=existing_key, fatal=False
+        )
         if status == 200:
             masked = (
                 existing_key[:12] + "…" + existing_key[-4:]
@@ -2461,7 +2466,8 @@ def cmd_help() -> None:
     print("""PersoIA CLI — Assistant code souverain
 
 Usage:
-  persoia login [--no-browser]     Connexion via le navigateur (par défaut) :
+  persoia login [--no-browser] [--force]
+                                   Connexion via le navigateur (par défaut) :
                                    ouvre chat.persoia.com, vous vous connectez
                                    sur le site, et le token CLI est récupéré
                                    automatiquement via un rappel local sur
