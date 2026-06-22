@@ -46,14 +46,18 @@ Invoke-WebRequest -Uri $url -OutFile $target
 # PowerShell 5.1, (Invoke-WebRequest ...).Content d'un .sha256 renvoie un
 # Byte[] (pas une chaîne), ce qui casserait un .Trim() direct.
 $expected = $null
-$shaTmp = Join-Path $env:TEMP 'persoia.exe.sha256'
+# Nom temporaire UNIQUE : évite tout conflit / résidu entre exécutions (le nom
+# fixe précédent pouvait persister si la lecture échouait après le download).
+$shaTmp = Join-Path $env:TEMP ("persoia.exe.{0}.sha256" -f ([guid]::NewGuid()))
 try {
     Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaTmp
     # Le sidecar ne contient que l'empreinte (cf. pipeline de release).
     $expected = (Get-Content -Raw $shaTmp).Trim()
-    Remove-Item $shaTmp -ErrorAction SilentlyContinue
 } catch {
     Write-Warning "Empreinte SHA-256 indisponible pour cette release : intégrité non vérifiée."
+} finally {
+    # Nettoyage garanti même si une exception survient après l'écriture.
+    Remove-Item $shaTmp -ErrorAction SilentlyContinue
 }
 if ($expected) {
     $actual = (Get-FileHash -Algorithm SHA256 -Path $target).Hash
