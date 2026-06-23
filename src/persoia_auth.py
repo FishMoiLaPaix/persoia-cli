@@ -38,7 +38,7 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "get_api_key",
@@ -227,10 +227,14 @@ def auth_headers(client: str | None = None, interactive: bool = True) -> dict[st
 
 
 def logout() -> None:
-    """Efface la clé du store partagé (laisse les autres valeurs intactes)."""
-    current = _read_file_config()
-    current.pop("PERSOIA_API_KEY", None)
-    save_config(current)
+    """Efface la clé du store partagé (laisse api_base/model/tenant intacts).
+
+    `save_config` relit le fichier et fusionne : retirer la clé via un `pop()`
+    serait réécrasé par la relecture du disque. On passe donc une valeur VIDE,
+    qui n'est pas réécrite (cf. `if value` dans `save_config`) → la clé disparaît
+    tout en conservant les autres champs.
+    """
+    save_config({"PERSOIA_API_KEY": ""})
 
 
 def login(client: str | None = None, timeout: int = 180) -> str | None:
