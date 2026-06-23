@@ -16,6 +16,8 @@ Usage:
     persoia help
 """
 
+from __future__ import annotations
+
 import atexit
 import hashlib
 import http.server
@@ -40,7 +42,7 @@ from pathlib import Path
 
 import persoia_auth
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 
 def collect_persoia_md_files() -> list[Path]:
