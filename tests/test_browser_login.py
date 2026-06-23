@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import persoia  # noqa: E402
+import persoia_auth  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +97,7 @@ def _run_browser_login(monkeypatch, opener, *, timeout: int = 5) -> dict | None:
         threading.Thread(target=opener, args=(url,), daemon=True).start()
         return True
 
-    monkeypatch.setattr(persoia.webbrowser, "open", fake_open)
+    monkeypatch.setattr(persoia_auth.webbrowser, "open", fake_open)
     return persoia._browser_login(config, timeout=timeout)
 
 
