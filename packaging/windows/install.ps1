@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Installe PersoIA CLI sur Windows sans MSI (alternative PowerShell, réf. #392).
 
@@ -42,11 +42,22 @@ Invoke-WebRequest -Uri $url -OutFile $target
 
 # --- Vérification d'intégrité (sidecar .sha256 publié avec la release) -------
 # Empêche l'exécution d'un binaire altéré (réseau/artefact compromis).
+# On télécharge le sidecar dans un fichier puis on le lit : sous Windows
+# PowerShell 5.1, (Invoke-WebRequest ...).Content d'un .sha256 renvoie un
+# Byte[] (pas une chaîne), ce qui casserait un .Trim() direct.
 $expected = $null
+# Nom temporaire UNIQUE : évite tout conflit / résidu entre exécutions (le nom
+# fixe précédent pouvait persister si la lecture échouait après le download).
+$shaTmp = Join-Path $env:TEMP ("persoia.exe.{0}.sha256" -f ([guid]::NewGuid()))
 try {
-    $expected = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content.Trim().Split()[0]
+    Invoke-WebRequest -Uri "$url.sha256" -OutFile $shaTmp
+    # Le sidecar ne contient que l'empreinte (cf. pipeline de release).
+    $expected = (Get-Content -Raw $shaTmp).Trim()
 } catch {
-    Write-Warning "Empreinte SHA-256 indisponible pour cette release — intégrité non vérifiée."
+    Write-Warning "Empreinte SHA-256 indisponible pour cette release : intégrité non vérifiée."
+} finally {
+    # Nettoyage garanti même si une exception survient après l'écriture.
+    Remove-Item $shaTmp -ErrorAction SilentlyContinue
 }
 if ($expected) {
     $actual = (Get-FileHash -Algorithm SHA256 -Path $target).Hash

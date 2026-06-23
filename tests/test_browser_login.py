@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import persoia  # noqa: E402
+import persoia_auth  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +97,7 @@ def _run_browser_login(monkeypatch, opener, *, timeout: int = 5) -> dict | None:
         threading.Thread(target=opener, args=(url,), daemon=True).start()
         return True
 
-    monkeypatch.setattr(persoia.webbrowser, "open", fake_open)
+    monkeypatch.setattr(persoia_auth.webbrowser, "open", fake_open)
     return persoia._browser_login(config, timeout=timeout)
 
 
@@ -355,3 +356,84 @@ class TestPortalBase:
     )
     def test_portal_base_only_trusts_persoia_com(self, api_base, expected):
         assert persoia._portal_base({"PERSOIA_API_BASE": api_base}) == expected
+
+
+# --------------------------------------------------------------------------- #
+# cmd_login idempotence (persoia-cli#26): ne pas re-minter une clé si déjà
+# connecté — c'était la cause de la rafale de tokens.
+# --------------------------------------------------------------------------- #
+
+def _config_with_valid_key() -> dict:
+    return {
+        "PERSOIA_API_KEY": "persoia_sk_" + "x" * 40,
+        "PERSOIA_API_BASE": "https://chat.persoia.com/v1",
+        "PERSOIA_MODEL": "small",
+        "PERSOIA_TENANT_NAME": "ACME",
+    }
+
+
+def test_login_idempotent_skips_browser_when_token_valid(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(persoia, "load_config", _config_with_valid_key)
+    monkeypatch.setattr(persoia, "api_request", lambda *a, **k: (200, {"data": [{"id": "small"}]}))
+    called = {"browser": False}
+    monkeypatch.setattr(
+        persoia, "_browser_login",
+        lambda cfg: called.__setitem__("browser", True) or None,
+    )
+
+    persoia.cmd_login([])
+
+    assert called["browser"] is False, "un token valide ne doit PAS rouvrir le flow (anti-rafale)"
+    assert "Déjà connecté" in capsys.readouterr().out
+
+
+def test_login_force_bypasses_idempotence(monkeypatch) -> None:
+    monkeypatch.setattr(persoia, "load_config", _config_with_valid_key)
+    monkeypatch.setattr(persoia, "api_request", lambda *a, **k: (200, {}))
+    saved: dict = {}
+    monkeypatch.setattr(persoia, "save_config", lambda v: saved.update(v))
+    monkeypatch.setattr(
+        persoia, "_browser_login",
+        lambda cfg: {"token": "persoia_sk_new", "api_base": cfg["PERSOIA_API_BASE"]},
+    )
+
+    persoia.cmd_login(["--force"])
+
+    assert saved.get("PERSOIA_API_KEY") == "persoia_sk_new", "--force doit relancer le flow malgré un token valide"
+
+
+def test_login_proceeds_when_existing_token_invalid(monkeypatch) -> None:
+    monkeypatch.setattr(persoia, "load_config", _config_with_valid_key)
+    monkeypatch.setattr(persoia, "api_request", lambda *a, **k: (401, {}))
+    monkeypatch.setattr(persoia, "save_config", lambda v: None)
+    called = {"browser": False}
+
+    def fake_browser(cfg: dict) -> dict:
+        called["browser"] = True
+        return {"token": "persoia_sk_fresh", "api_base": cfg["PERSOIA_API_BASE"]}
+
+    monkeypatch.setattr(persoia, "_browser_login", fake_browser)
+
+    persoia.cmd_login([])
+
+    assert called["browser"] is True, "un token révoqué/expiré doit relancer une connexion"
+
+
+def test_login_proceeds_when_api_unreachable(monkeypatch) -> None:
+    # API injoignable : la sonde NON-FATALE (fatal=False) renvoie (None, None)
+    # → pas de raccourci « déjà connecté », pas de sys.exit, on poursuit vers
+    # la connexion normale (review Copilot cli#27).
+    monkeypatch.setattr(persoia, "load_config", _config_with_valid_key)
+    monkeypatch.setattr(persoia, "api_request", lambda *a, **k: (None, None))
+    monkeypatch.setattr(persoia, "save_config", lambda v: None)
+    called = {"browser": False}
+
+    def fake_browser(cfg: dict) -> dict:
+        called["browser"] = True
+        return {"token": "persoia_sk_fresh", "api_base": cfg["PERSOIA_API_BASE"]}
+
+    monkeypatch.setattr(persoia, "_browser_login", fake_browser)
+
+    persoia.cmd_login([])
+
+    assert called["browser"] is True, "API injoignable ne doit pas bloquer login (fatal=False)"
