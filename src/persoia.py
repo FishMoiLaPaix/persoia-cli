@@ -38,6 +38,8 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 
+import persoia_auth
+
 __version__ = "0.6.2"
 
 
@@ -69,16 +71,12 @@ def collect_persoia_md_files() -> list[Path]:
 
 def get_config_dir() -> Path:
     """Return the config directory, respecting XDG on Linux/macOS and APPDATA on Windows."""
-    if platform.system() == "Windows":
-        base = os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")
-        return Path(base) / "persoia"
-    base = os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-    return Path(base) / "persoia"
+    return persoia_auth.get_config_dir()
 
 
 def get_config_path() -> Path:
     """Return the path to the config file."""
-    return Path(os.environ.get("PERSOIA_CONFIG", get_config_dir() / "config.env"))
+    return persoia_auth.get_config_path()
 
 
 def resolve_api_base(api_key: str, explicit_base: str) -> str:
@@ -88,73 +86,17 @@ def resolve_api_base(api_key: str, explicit_base: str) -> str:
     All other tokens (including persoia_sk_) route to the production API.
     If PERSOIA_API_BASE was explicitly set (env var or config file), it takes precedence.
     """
-    if explicit_base.strip():
-        return explicit_base.strip()
-    if api_key.strip().startswith("persoia_demo_sk_"):
-        return "https://demo.chat.persoia.com/v1"
-    # Production API is served from the chat host (chat.persoia.com/api/v1 +
-    # /v1 OpenAI proxy), same as the demo pattern. api.persoia.com is not
-    # provisioned (503 + self-signed TLS cert), so it must not be the default.
-    return "https://chat.persoia.com/v1"
+    return persoia_auth.resolve_api_base(api_key, explicit_base)
 
 
 def load_config() -> dict:
     """Load configuration from the config file. Only PERSOIA_ prefixed keys are allowed."""
-    config = {
-        "PERSOIA_API_KEY": os.environ.get("PERSOIA_API_KEY", ""),
-        "PERSOIA_API_BASE": os.environ.get("PERSOIA_API_BASE", ""),
-        "PERSOIA_MODEL": os.environ.get("PERSOIA_MODEL", ""),
-        "PERSOIA_TENANT_NAME": os.environ.get("PERSOIA_TENANT_NAME", ""),
-    }
-
-    config_path = get_config_path()
-    if config_path.exists():
-        try:
-            raw = config_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            # A corrupted/non-UTF-8 config.env must not crash recovery commands
-            # like `persoia logout` or `persoia config` before main() can dispatch.
-            raw = ""
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key.startswith("PERSOIA_"):
-                config[key] = value.strip()
-
-    # Auto-detect API base from token prefix when not explicitly configured
-    config["PERSOIA_API_BASE"] = resolve_api_base(
-        config["PERSOIA_API_KEY"], config["PERSOIA_API_BASE"]
-    )
-
-    return config
+    return persoia_auth.load_config()
 
 
 def save_config(values: dict) -> None:
     """Save configuration to the config file with restrictive permissions."""
-    config_dir = get_config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = get_config_path()
-
-    lines = ["# PersoIA CLI configuration — généré par persoia login"]
-    for key, value in sorted(values.items()):
-        if key.startswith("PERSOIA_") and value:
-            lines.append(f"{key}={value}")
-    lines.append("")
-    content = "\n".join(lines)
-
-    if platform.system() == "Windows":
-        config_path.write_text(content, encoding="utf-8")
-    else:
-        # Open with restrictive mode upfront — avoids an umask-dependent window
-        # where the API key would be world-readable between write and chmod.
-        fd = os.open(str(config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
+    persoia_auth.save_config(values)
 
 
 def api_request(
@@ -1103,29 +1045,8 @@ def _make_raw_template(scan: dict) -> str:
 # --- Commands ---
 
 def _portal_base(config: dict) -> str:
-    """Return the web portal origin (``https://<host>``) for the current env.
-
-    The user-facing portal (Vue/Quasar frontend, where the user logs in)
-    lives at the chat host, not at api.persoia.com (backend Go). Derive it
-    from the configured API base: map an `api.` prefix to `chat.`, keep an
-    existing `chat.`/`*.chat.` host as-is (demo uses `demo.chat.`), else fall
-    back to the production portal.
-    """
-    api_base = config.get("PERSOIA_API_BASE", "https://chat.persoia.com/v1")
-    parsed = urllib.parse.urlparse(api_base)
-    host = (parsed.hostname or "chat.persoia.com").lower()
-    # Only derive a portal from a TRUSTED persoia.com host (exact match or a
-    # .persoia.com subdomain). Otherwise fall back to the production portal.
-    # A substring check like ".chat. in host" would accept an attacker host
-    # such as "evil.chat.attacker.tld" and then echo it in the CORS
-    # Access-Control-Allow-Origin, letting a hostile portal drive the login.
-    if host != "persoia.com" and not host.endswith(".persoia.com"):
-        portal_host = "chat.persoia.com"
-    elif host.startswith("api."):
-        portal_host = "chat." + host[len("api."):]
-    else:
-        portal_host = host
-    return f"https://{portal_host}"
+    """Return the web portal origin (``https://<host>``) for the current env."""
+    return persoia_auth._portal_base(config)
 
 
 def _valid_api_base(raw: str | None) -> str:
@@ -1135,18 +1056,7 @@ def _valid_api_base(raw: str | None) -> str:
     `persoia.com` or a `.persoia.com` subdomain over https, so a value like
     `https://evil.persoia.com.attacker.tld` is rejected.
     """
-    raw = (raw or "").strip()
-    try:
-        parsed = urllib.parse.urlparse(raw)
-    except ValueError:
-        return ""
-    if (
-        parsed.scheme == "https"
-        and parsed.hostname is not None
-        and (parsed.hostname == "persoia.com" or parsed.hostname.endswith(".persoia.com"))
-    ):
-        return raw
-    return ""
+    return persoia_auth._valid_api_base(raw)
 
 
 def _open_cli_page(config: dict) -> None:
@@ -1164,154 +1074,9 @@ def _open_cli_page(config: dict) -> None:
 def _browser_login(config: dict, timeout: int = 180) -> dict | None:
     """Authenticate through the web portal and capture a CLI token.
 
-    Starts a loopback HTTP server on 127.0.0.1:<random>, opens the portal's
-    `/cli` authorize page with a `callback` (the loopback URL) and an
-    anti-CSRF `state`. The page logs the user in (verifying rights + tenant),
-    mints a dedicated CLI key, and delivers it back to the loopback endpoint —
-    by POSTing JSON `{token, state, api_base?, model?, tenant_name?}` (the
-    token never appears in a URL), with a GET `?token=&state=` fallback.
-
-    The callback URL uses the literal IPv4 address ``127.0.0.1`` rather than
-    ``localhost`` on purpose: on modern macOS/Linux ``localhost`` may resolve
-    to the IPv6 loopback ``::1``, and a browser fetch from chat.persoia.com
-    would then fail to reach a CLI server bound only on the IPv4 loopback.
-
     Returns the captured values on success, or None on timeout/failure.
     """
-    portal = _portal_base(config)
-    state = secrets.token_urlsafe(24)
-    result: dict = {}
-    done = threading.Event()
-
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        def _cors(self) -> None:
-            # Only the portal origin may post the token to this loopback server.
-            self.send_header("Access-Control-Allow-Origin", portal)
-            self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-        def _page(self, status: int, message: str) -> None:
-            self.send_response(status)
-            self._cors()
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            html = (
-                "<!doctype html><html lang='fr'><meta charset='utf-8'>"
-                "<title>PersoIA CLI</title>"
-                "<body style='font-family:sans-serif;text-align:center;margin-top:4em'>"
-                f"<h2>{message}</h2><p>Vous pouvez fermer cet onglet.</p></body></html>"
-            )
-            self.wfile.write(html.encode("utf-8"))
-
-        def _accept(self, token: str, got_state: str, extra: dict) -> bool:
-            # Single-use: once a valid callback captured a token, ignore any
-            # further callback (race between done.set() and server.shutdown())
-            # so a second request cannot overwrite the result.
-            if result.get("token"):
-                self._page(200, "Connexion déjà reçue.")
-                return True
-            # Constant-time state comparison to thwart timing oracles.
-            if not got_state or not secrets.compare_digest(got_state, state):
-                self._page(400, "État invalide — connexion refusée.")
-                return False
-            if not token:
-                self._page(400, "Token manquant.")
-                return False
-            result["token"] = token
-            api_base = _valid_api_base(extra.get("api_base", ""))
-            if api_base:
-                result["api_base"] = api_base
-            if extra.get("model"):
-                result["model"] = extra["model"]
-            if extra.get("tenant_name"):
-                result["tenant_name"] = extra["tenant_name"]
-            self._page(200, "Connexion réussie !")
-            return True
-
-        def do_OPTIONS(self) -> None:  # noqa: N802 — http.server interface
-            self.send_response(204)
-            self._cors()
-            # Chrome/Edge "Private Network Access": a request from a secure
-            # public origin (the portal, e.g. https://chat.persoia.com or the
-            # demo portal) to a private/loopback address (127.0.0.1) is gated
-            # behind a preflight carrying
-            # `Access-Control-Request-Private-Network: true`. Without an
-            # explicit `Access-Control-Allow-Private-Network: true` in the
-            # response, the browser blocks the POST and the portal reports
-            # "Impossible de joindre le terminal". Echo it when requested.
-            if self.headers.get("Access-Control-Request-Private-Network") == "true":
-                self.send_header("Access-Control-Allow-Private-Network", "true")
-            self.end_headers()
-
-        def do_POST(self) -> None:  # noqa: N802 — http.server interface
-            if urllib.parse.urlparse(self.path).path != "/callback":
-                self.send_response(404)
-                self.end_headers()
-                return
-            try:
-                length = int(self.headers.get("Content-Length", "0") or "0")
-            except ValueError:
-                length = 0
-            raw = self.rfile.read(length) if length > 0 else b""
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
-            if self._accept(str(data.get("token", "")), str(data.get("state", "")), data):
-                done.set()
-
-        def do_GET(self) -> None:  # noqa: N802 — http.server interface
-            parsed = urllib.parse.urlparse(self.path)
-            if parsed.path != "/callback":
-                self.send_response(404)
-                self.end_headers()
-                return
-            q = urllib.parse.parse_qs(parsed.query)
-            extra = {
-                "api_base": q.get("api_base", [""])[0],
-                "model": q.get("model", [""])[0],
-                "tenant_name": q.get("tenant_name", [""])[0],
-            }
-            if self._accept(q.get("token", [""])[0], q.get("state", [""])[0], extra):
-                done.set()
-
-        def log_message(self, *args: object) -> None:
-            pass  # keep the loopback server silent
-
-    try:
-        server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-    except OSError as e:
-        print(f"Impossible de démarrer le serveur local de connexion : {e}", file=sys.stderr)
-        return None
-
-    port = server.server_address[1]
-    # Bind/advertise the loopback on the literal IPv4 address (not
-    # ``localhost``, which may resolve to ``::1`` and break the browser fetch).
-    callback = f"http://127.0.0.1:{port}/callback"
-    authorize_url = (
-        f"{portal}/cli?callback={urllib.parse.quote(callback, safe='')}"
-        f"&state={urllib.parse.quote(state, safe='')}"
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        print(f"Ouverture de {portal} pour la connexion...")
-        print("Si la page ne s'ouvre pas, collez cette URL dans votre navigateur :")
-        print(f"  {authorize_url}")
-        print()
-        print("En attente de la connexion dans le navigateur...")
-        webbrowser.open(authorize_url)
-        got = done.wait(timeout=timeout)
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    if not got or "token" not in result:
-        return None
-    return result
+    return persoia_auth._browser_login(config, timeout=timeout)
 
 
 def cmd_login(args: list[str]) -> None:
