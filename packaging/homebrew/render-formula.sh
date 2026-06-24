@@ -78,11 +78,15 @@ git config user.email "ci@persoia.com"
 # aucun changement et n'aurait jamais publié la formula. Stager puis comparer
 # l'index à HEAD détecte aussi bien une création qu'une modification.
 git add Formula/persoia.rb
-if git diff --cached --quiet -- Formula/persoia.rb; then
+# `git diff --cached` compare l'index à HEAD : si le tap vient d'être créé et
+# n'a encore aucun commit (HEAD absent), on force la publication du 1er commit.
+if git rev-parse --verify -q HEAD >/dev/null && git diff --cached --quiet -- Formula/persoia.rb; then
     echo "Formula déjà à jour pour $VERSION — rien à pousser."
     exit 0
 fi
 git commit -m "persoia ${VERSION}"
-git push
+# Push explicite avec -u : robuste si la branche n'a pas encore d'upstream
+# (tap fraîchement créé) ; sans effet si l'upstream existe déjà.
+git push -u origin HEAD
 
 echo "Formula Homebrew mise à jour : persoia ${VERSION}"
