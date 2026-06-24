@@ -42,7 +42,7 @@ from pathlib import Path
 
 import persoia_auth
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 
 
 def collect_persoia_md_files() -> list[Path]:
