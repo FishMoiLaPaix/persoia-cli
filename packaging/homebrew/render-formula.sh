@@ -85,8 +85,15 @@ if git rev-parse --verify -q HEAD >/dev/null && git diff --cached --quiet -- For
     exit 0
 fi
 git commit -m "persoia ${VERSION}"
-# Push explicite avec -u : robuste si la branche n'a pas encore d'upstream
-# (tap fraîchement créé) ; sans effet si l'upstream existe déjà.
-git push -u origin HEAD
+# `git push` n'hérite PAS de l'authentification de `gh` : le clone via `gh repo
+# clone` est authentifié, mais un `git push` brut n'a aucun credential et
+# échoue (« could not read Username »). On branche le credential helper de gh —
+# qui lit GH_TOKEN — uniquement pour ce push, sans toucher la config git globale
+# ni exposer le token sur la ligne de commande. Le helper vide en tête
+# réinitialise d'éventuels helpers hérités de l'environnement.
+# Push explicite avec -u : robuste si la branche n'a pas encore d'upstream.
+git -c credential.helper= \
+    -c credential.helper='!gh auth git-credential' \
+    push -u origin HEAD
 
 echo "Formula Homebrew mise à jour : persoia ${VERSION}"
