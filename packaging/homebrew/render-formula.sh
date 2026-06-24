@@ -73,12 +73,20 @@ cp "$FORMULA" "$CLONE/Formula/persoia.rb"
 cd "$CLONE"
 git config user.name  "persoia-ci"
 git config user.email "ci@persoia.com"
-if git diff --quiet -- Formula/persoia.rb; then
+# On stage d'abord : `git diff` (sans --cached) ignore les fichiers non suivis,
+# donc au tout premier passage (Formula/persoia.rb absent du tap) il ne verrait
+# aucun changement et n'aurait jamais publié la formula. Stager puis comparer
+# l'index à HEAD détecte aussi bien une création qu'une modification.
+git add Formula/persoia.rb
+# `git diff --cached` compare l'index à HEAD : si le tap vient d'être créé et
+# n'a encore aucun commit (HEAD absent), on force la publication du 1er commit.
+if git rev-parse --verify -q HEAD >/dev/null && git diff --cached --quiet -- Formula/persoia.rb; then
     echo "Formula déjà à jour pour $VERSION — rien à pousser."
     exit 0
 fi
-git add Formula/persoia.rb
 git commit -m "persoia ${VERSION}"
-git push
+# Push explicite avec -u : robuste si la branche n'a pas encore d'upstream
+# (tap fraîchement créé) ; sans effet si l'upstream existe déjà.
+git push -u origin HEAD
 
 echo "Formula Homebrew mise à jour : persoia ${VERSION}"
