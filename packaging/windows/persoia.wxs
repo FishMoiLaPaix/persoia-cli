@@ -31,14 +31,14 @@
            Language="1036"
            Codepage="1252"
            Version="$(var.Version)"
-           Manufacturer="FishMoiLaPaix SAS"
+           Manufacturer="MSPLR"
            UpgradeCode="4F8C2A1E-3B7D-4E9A-9C16-5D2E8F0A7B34">
 
     <Package InstallerVersion="500"
              Compressed="yes"
              InstallScope="perUser"
              Description="PersoIA CLI — assistant code souverain"
-             Manufacturer="FishMoiLaPaix SAS"
+             Manufacturer="MSPLR"
              Languages="1036"
              SummaryCodepage="1252" />
 

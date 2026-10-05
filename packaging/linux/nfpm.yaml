@@ -15,12 +15,12 @@ version_schema: none
 release: "1"
 section: utils
 priority: optional
-maintainer: FishMoiLaPaix SAS <contact@persoia.com>
+maintainer: MSPLR <contact@persoia.com>
 description: |
   PersoIA CLI — assistant code souverain.
   Wrapper CLI pour PersoIA : utilisez votre instance GPU privée depuis le
   terminal, en mode chat ou code (intégration aider).
-vendor: FishMoiLaPaix SAS
+vendor: MSPLR
 homepage: https://www.persoia.com
 license: MIT
 
