@@ -239,8 +239,12 @@ PY
                             # Covers _valid_api_base allowlist, the anti-CSRF
                             # state rejection, and the loopback callback handler
                             # (deterministic, loopback-only, no real browser).
-                            python3 -m pip install --quiet --disable-pip-version-check 'pytest==9.0.2'
-                            python3 -m pytest -q tests/test_browser_login.py
+                            # The agent's system Python is externally managed
+                            # (PEP 668): pip refuses to install into it, so
+                            # pytest goes into a throwaway virtual environment.
+                            python3 -m venv /tmp/venv-lint
+                            /tmp/venv-lint/bin/python -m pip install --quiet --disable-pip-version-check 'pytest==9.0.2'
+                            /tmp/venv-lint/bin/python -m pytest -q tests/test_browser_login.py
                         '''
                     }
                 }
